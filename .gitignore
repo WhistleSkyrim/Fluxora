@@ -1,0 +1,30 @@
+# Visual Studio / Rider
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# .NET
+bin/
+obj/
+TestResults/
+
+# CMake / C++
+build/
+out/
+CMakeUserPresets.json
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.dll
+*.exe
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini

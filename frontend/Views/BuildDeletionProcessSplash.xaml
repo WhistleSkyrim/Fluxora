@@ -1,0 +1,430 @@
+<UserControl x:Class="Fluxora.App.Views.BuildDeletionProcessSplash"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:services="clr-namespace:Fluxora.App.Services"
+             xmlns:controls="clr-namespace:Fluxora.App.Controls"
+             IsHitTestVisible="{Binding IsVisible}"
+             SnapsToDevicePixels="True"
+             UseLayoutRounding="True">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+
+        <SolidColorBrush x:Key="DeletionTextBrush" Color="#F7F4FF" />
+        <SolidColorBrush x:Key="DeletionSecondaryTextBrush" Color="#F6C8D1" />
+        <SolidColorBrush x:Key="DeletionMutedTextBrush" Color="#A993A3" />
+        <SolidColorBrush x:Key="DeletionErrorBrush" Color="#FB7185" />
+
+        <LinearGradientBrush x:Key="DeletionCoreBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#FFF1F4" Offset="0" />
+            <GradientStop Color="#FB7185" Offset="0.48" />
+            <GradientStop Color="#E11D48" Offset="1" />
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="DeletionProgressBrush" StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="#FB7185" Offset="0" />
+            <GradientStop Color="#F43F5E" Offset="0.55" />
+            <GradientStop Color="#BE123C" Offset="1" />
+        </LinearGradientBrush>
+
+        <Style x:Key="DeletionProgressBarStyle" TargetType="{x:Type ProgressBar}">
+            <Setter Property="Height" Value="8" />
+            <Setter Property="Minimum" Value="0" />
+            <Setter Property="Maximum" Value="100" />
+            <Setter Property="Foreground" Value="{StaticResource DeletionProgressBrush}" />
+            <Setter Property="Background" Value="#1B111B" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ProgressBar}">
+                        <Grid x:Name="Root"
+                              Height="{TemplateBinding Height}"
+                              ClipToBounds="True">
+                            <Border x:Name="PART_Track"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="#4A2434"
+                                    BorderThickness="1"
+                                    CornerRadius="4" />
+                            <Border x:Name="PulseLayer"
+                                    BorderBrush="#FB7185"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Opacity="0" />
+                            <Decorator x:Name="PART_Indicator"
+                                       HorizontalAlignment="Left"
+                                       ClipToBounds="True">
+                                <Grid ClipToBounds="True">
+                                    <Border Background="{TemplateBinding Foreground}"
+                                            CornerRadius="4" />
+                                    <Border x:Name="ProgressSheen"
+                                            Width="72"
+                                            HorizontalAlignment="Left"
+                                            Opacity="0"
+                                            CornerRadius="4">
+                                        <Border.Background>
+                                            <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                                                <GradientStop Color="#00FFFFFF" Offset="0" />
+                                                <GradientStop Color="#70FFFFFF" Offset="0.48" />
+                                                <GradientStop Color="#00FFFFFF" Offset="1" />
+                                            </LinearGradientBrush>
+                                        </Border.Background>
+                                        <Border.RenderTransform>
+                                            <TranslateTransform x:Name="ProgressSheenTranslate" X="-82" />
+                                        </Border.RenderTransform>
+                                    </Border>
+                                </Grid>
+                            </Decorator>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="services:ProgressAnimationService.IsActive" Value="True">
+                                <Setter TargetName="ProgressSheen" Property="Opacity" Value="0.25" />
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard x:Name="DeletionProgressStoryboard">
+                                        <Storyboard RepeatBehavior="Forever">
+                                            <DoubleAnimation Storyboard.TargetName="PulseLayer"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             From="0.08"
+                                                             To="0.28"
+                                                             AutoReverse="True"
+                                                             Duration="0:0:1.8" />
+                                            <DoubleAnimation Storyboard.TargetName="ProgressSheenTranslate"
+                                                             Storyboard.TargetProperty="X"
+                                                             From="-82"
+                                                             To="340"
+                                                             Duration="0:0:2.45" />
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <RemoveStoryboard BeginStoryboardName="DeletionProgressStoryboard" />
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DeletionGhostButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="Height" Value="38" />
+            <Setter Property="Padding" Value="20,0" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource DeletionSecondaryTextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="#21131D"
+                                BorderBrush="#5A2336"
+                                BorderThickness="1"
+                                CornerRadius="9">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="#2A1622" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#FB7185" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.82" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.4" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <UserControl.Style>
+        <Style TargetType="{x:Type UserControl}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsVisible}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Style>
+
+    <Grid>
+        <Grid.Triggers>
+            <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                <BeginStoryboard>
+                    <Storyboard RepeatBehavior="Forever">
+                        <DoubleAnimation Storyboard.TargetName="MainArcRotate"
+                                         Storyboard.TargetProperty="Angle"
+                                         From="-24"
+                                         To="696"
+                                         Duration="0:0:3.7" />
+                        <DoubleAnimation Storyboard.TargetName="EchoArcRotate"
+                                         Storyboard.TargetProperty="Angle"
+                                         From="42"
+                                         To="-678"
+                                         Duration="0:0:3.7" />
+                        <DoubleAnimation Storyboard.TargetName="MainArc"
+                                         Storyboard.TargetProperty="StrokeDashOffset"
+                                         From="0"
+                                         To="-43.2"
+                                         Duration="0:0:3.7" />
+                        <DoubleAnimation Storyboard.TargetName="EchoArc"
+                                         Storyboard.TargetProperty="StrokeDashOffset"
+                                         From="0"
+                                         To="23.6"
+                                         Duration="0:0:3.7" />
+                        <DoubleAnimation Storyboard.TargetName="CoreRotate"
+                                         Storyboard.TargetProperty="Angle"
+                                         From="0"
+                                         To="360"
+                                         Duration="0:0:3.7" />
+
+                        <DoubleAnimationUsingKeyFrames Storyboard.TargetName="CoreScale"
+                                                       Storyboard.TargetProperty="ScaleX">
+                            <SplineDoubleKeyFrame KeyTime="0:0:0" Value="0.82" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:0.92" Value="1.32" KeySpline="0.26,0 0.14,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:1.91" Value="0.88" KeySpline="0.42,0 0.16,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:2.83" Value="1.12" KeySpline="0.2,0 0.12,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:3.7" Value="0.82" KeySpline="0.26,0 0.16,1" />
+                        </DoubleAnimationUsingKeyFrames>
+                        <DoubleAnimationUsingKeyFrames Storyboard.TargetName="CoreScale"
+                                                       Storyboard.TargetProperty="ScaleY">
+                            <SplineDoubleKeyFrame KeyTime="0:0:0" Value="0.82" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:0.92" Value="0.76" KeySpline="0.26,0 0.14,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:1.91" Value="1.18" KeySpline="0.42,0 0.16,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:2.83" Value="0.92" KeySpline="0.2,0 0.12,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:3.7" Value="0.82" KeySpline="0.26,0 0.16,1" />
+                        </DoubleAnimationUsingKeyFrames>
+
+                        <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PulseScale"
+                                                       Storyboard.TargetProperty="ScaleX">
+                            <SplineDoubleKeyFrame KeyTime="0:0:0" Value="0.88" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:1.63" Value="1.18" KeySpline="0.2,0 0.16,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:3.7" Value="0.88" KeySpline="0.28,0 0.16,1" />
+                        </DoubleAnimationUsingKeyFrames>
+                        <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PulseScale"
+                                                       Storyboard.TargetProperty="ScaleY">
+                            <SplineDoubleKeyFrame KeyTime="0:0:0" Value="0.88" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:1.63" Value="1.18" KeySpline="0.2,0 0.16,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:3.7" Value="0.88" KeySpline="0.28,0 0.16,1" />
+                        </DoubleAnimationUsingKeyFrames>
+                        <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PulseLayer"
+                                                       Storyboard.TargetProperty="Opacity">
+                            <SplineDoubleKeyFrame KeyTime="0:0:0" Value="0.08" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:1.63" Value="0.22" KeySpline="0.2,0 0.16,1" />
+                            <SplineDoubleKeyFrame KeyTime="0:0:3.7" Value="0.08" KeySpline="0.28,0 0.16,1" />
+                        </DoubleAnimationUsingKeyFrames>
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Grid.Triggers>
+
+        <Grid.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#F7080711" Offset="0" />
+                <GradientStop Color="#F40D0A18" Offset="0.52" />
+                <GradientStop Color="#F5121022" Offset="1" />
+            </LinearGradientBrush>
+        </Grid.Background>
+
+        <Grid Width="460"
+              MaxWidth="460"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              Margin="28">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="30" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="10" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="26" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid Width="124"
+                  Height="124"
+                  HorizontalAlignment="Center">
+                <Ellipse Width="104"
+                         Height="104"
+                         Stroke="#3A1F2C"
+                         StrokeThickness="7"
+                         Opacity="0.9" />
+
+                <Grid x:Name="SpinnerLayer">
+                    <Ellipse x:Name="PulseLayer"
+                             Width="78"
+                             Height="78"
+                             Fill="#3A1A2A"
+                             Opacity="0.08"
+                             RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <ScaleTransform x:Name="PulseScale" />
+                        </Ellipse.RenderTransform>
+                    </Ellipse>
+
+                    <Ellipse x:Name="MainArc"
+                             Width="104"
+                             Height="104"
+                             Stroke="#FB7185"
+                             StrokeThickness="7"
+                             StrokeStartLineCap="Round"
+                             StrokeEndLineCap="Round"
+                             StrokeDashCap="Round"
+                             StrokeDashArray="6.4 15.2"
+                             RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform x:Name="MainArcRotate" />
+                        </Ellipse.RenderTransform>
+                    </Ellipse>
+
+                    <Ellipse x:Name="EchoArc"
+                             Width="68"
+                             Height="68"
+                             Stroke="#FFF1F4"
+                             StrokeThickness="4"
+                             StrokeStartLineCap="Round"
+                             StrokeEndLineCap="Round"
+                             StrokeDashCap="Round"
+                             StrokeDashArray="2.2 9.6"
+                             Opacity="0.42"
+                             RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform x:Name="EchoArcRotate" />
+                        </Ellipse.RenderTransform>
+                    </Ellipse>
+
+                    <Border Width="28"
+                            Height="28"
+                            CornerRadius="14"
+                            Background="{StaticResource DeletionCoreBrush}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            RenderTransformOrigin="0.5,0.5">
+                        <Border.RenderTransform>
+                            <TransformGroup>
+                                <ScaleTransform x:Name="CoreScale" />
+                                <RotateTransform x:Name="CoreRotate" />
+                            </TransformGroup>
+                        </Border.RenderTransform>
+                    </Border>
+                </Grid>
+
+                <Grid x:Name="DoneLayer"
+                      Opacity="0">
+                    <Ellipse Width="104"
+                             Height="104"
+                             Stroke="#FB7185"
+                             StrokeThickness="7"
+                             Opacity="0.9" />
+                    <controls:LineIcon x:Name="StateIcon"
+                                       Width="38"
+                                       Height="38"
+                                       Data="{StaticResource Icon.Trash}"
+                                       Foreground="#FFF1F4"
+                                       StrokeThickness="1.9"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                </Grid>
+            </Grid>
+
+            <TextBlock x:Name="StepText"
+                       Grid.Row="2"
+                       FontSize="28"
+                       FontWeight="Black"
+                       Foreground="{StaticResource DeletionTextBrush}"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       RenderTransformOrigin="0.5,0.5">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform x:Name="StepTranslate" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+
+            <TextBlock Grid.Row="4"
+                       Text="{Binding StatusText}"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Foreground="{StaticResource DeletionSecondaryTextBrush}"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextTrimming="CharacterEllipsis"
+                       MaxWidth="440" />
+
+            <StackPanel Grid.Row="6">
+                <Grid Margin="0,0,0,9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Общий прогресс"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Foreground="{StaticResource DeletionMutedTextBrush}"
+                               VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding Value, ElementName=OverallBar, StringFormat={}{0:0}%}"
+                               FontSize="13"
+                               FontWeight="Black"
+                               Foreground="{StaticResource DeletionTextBrush}"
+                               VerticalAlignment="Center" />
+                </Grid>
+
+                <ProgressBar x:Name="OverallBar"
+                             Style="{StaticResource DeletionProgressBarStyle}"
+                             services:ProgressAnimationService.IsActive="{Binding IsRunning}"
+                             services:SmoothProgressService.TargetValue="{Binding OverallPercent}" />
+
+                <TextBlock Text="{Binding BytesText}"
+                           Margin="0,10,0,0"
+                           FontSize="11"
+                           Foreground="{StaticResource DeletionMutedTextBrush}"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="{Binding EntriesText}"
+                           Margin="0,5,0,0"
+                           FontSize="11"
+                           Foreground="{StaticResource DeletionMutedTextBrush}"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+
+                <Border Background="#2A1220"
+                        BorderBrush="#7F1D3A"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        Padding="12"
+                        Margin="0,16,0,0"
+                        Visibility="{Binding HasError, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <TextBlock Text="{Binding ErrorMessage}"
+                               Foreground="{StaticResource DeletionErrorBrush}"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap" />
+                </Border>
+
+                <Button Style="{StaticResource DeletionGhostButtonStyle}"
+                        Content="Закрыть"
+                        HorizontalAlignment="Center"
+                        MinWidth="132"
+                        Margin="0,22,0,0"
+                        Visibility="{Binding CanClose, Converter={StaticResource BooleanToVisibilityConverter}}"
+                        Command="{Binding CloseCommand, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}" />
+            </StackPanel>
+        </Grid>
+
+        <Border Height="1"
+                VerticalAlignment="Top"
+                Background="#4A2434"
+                Opacity="0.34" />
+    </Grid>
+</UserControl>

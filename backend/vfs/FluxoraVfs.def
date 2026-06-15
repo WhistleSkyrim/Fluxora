@@ -1,0 +1,15 @@
+; Module-definition file for the injected virtual file system DLL.
+;
+; Microsoft Detours injects a payload DLL by rewriting the target executable's
+; import table to import *ordinal #1* from it (see Detours' uimports.cpp:
+; "pt[0] = IMAGE_ORDINAL_FLAG + 1"). The Windows loader therefore refuses to
+; start any process we inject into unless this DLL actually exports something at
+; ordinal 1 -- without it the game (and every child process we propagate into)
+; dies on startup with STATUS_ORDINAL_NOT_FOUND and the VFS never runs.
+;
+; Following the Detours samples, we re-export Detours' own
+; DetourFinishHelperProcess at ordinal 1 (NONAME). It is pulled in from the
+; statically linked Detours library and is also the entry point Detours invokes
+; in the helper process used for cross-bitness injection.
+EXPORTS
+    DetourFinishHelperProcess @1 NONAME

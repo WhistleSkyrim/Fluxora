@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Fluxora.App</AssemblyName>
+    <RootNamespace>Fluxora.App</RootNamespace>
+    <ApplicationIcon>..\Icons\Fluxora.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\Icons\Fluxora.ico" Link="Fluxora.ico" />
+    <Resource Include="..\Icons\*.svg" LinkBase="Assets\Icons" />
+    <Resource Include="Assets\Images\*.png" />
+    <!-- Embedded brand typefaces (Unbounded = display/headings, Onest = body/UI).
+         Both cover Latin + Cyrillic + German, so RU/EN/DE render in-brand.
+         Bundled as Resource so they render identically on every machine without install. -->
+    <Resource Include="Fonts\*.ttf" />
+    <None Include="Fonts\*-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lang\*.json" CopyToOutputDirectory="PreserveNewest" TargetPath="lang\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Target Name="CopyNativeCore" AfterTargets="Build">
+    <ItemGroup>
+      <NativeCoreCandidate Include="..\build\backend\$(Configuration)\FluxoraCore.dll"
+                           Condition="Exists('..\build\backend\$(Configuration)\FluxoraCore.dll')" />
+      <NativeCoreCandidate Include="..\build\backend\FluxoraCore.dll"
+                           Condition="Exists('..\build\backend\FluxoraCore.dll')" />
+      <!-- The injected virtual file system hook must sit next to FluxoraCore.dll so the
+           core can locate and inject it when launching a game. Without it the VFS launch
+           silently falls back to a plain, unvirtualized run. -->
+      <NativeVfsCandidate Include="..\build\backend\$(Configuration)\FluxoraVfs.dll"
+                          Condition="Exists('..\build\backend\$(Configuration)\FluxoraVfs.dll')" />
+      <NativeVfsCandidate Include="..\build\backend\FluxoraVfs.dll"
+                          Condition="Exists('..\build\backend\FluxoraVfs.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeCoreCandidate)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(NativeCoreCandidate)' != ''" />
+    <Copy SourceFiles="@(NativeVfsCandidate)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(NativeVfsCandidate)' != ''" />
+  </Target>
+</Project>
