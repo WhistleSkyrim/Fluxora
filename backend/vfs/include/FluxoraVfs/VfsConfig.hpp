@@ -5,6 +5,19 @@
 
 namespace fluxora::vfs
 {
+    struct VfsMountConfig
+    {
+        std::wstring target;     // real directory this mount is projected onto
+        std::wstring overwrite;  // writable overlay for this mount
+        std::vector<std::wstring> mods; // load order ascending (last wins)
+        std::vector<std::wstring> excludedRootNames;
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            return !target.empty();
+        }
+    };
+
     // Parsed form of the JSON descriptor written by the manager. Paths are stored
     // as plain DOS paths (for example "C:\\Games\\Skyrim\\Data"); the tree builder
     // normalizes them as needed.
@@ -16,10 +29,11 @@ namespace fluxora::vfs
         std::wstring logPath;
         std::wstring hookDll;    // FluxoraVfs.dll path, for child re-injection
         std::vector<std::wstring> mods; // load order ascending (last wins)
+        std::vector<VfsMountConfig> mounts;
 
         [[nodiscard]] bool isValid() const noexcept
         {
-            return !target.empty();
+            return !mounts.empty();
         }
     };
 

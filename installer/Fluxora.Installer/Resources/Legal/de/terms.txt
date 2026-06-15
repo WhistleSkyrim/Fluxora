@@ -1,0 +1,44 @@
+Fluxora Nutzungsbedingungen
+Stand: 15. Juni 2026
+
+1. Annahme
+Mit der Installation oder Nutzung von Fluxora stimmen Sie diesen Nutzungsbedingungen und der Fluxora Datenschutzerklärung zu. Wenn Sie nicht zustimmen, installieren und nutzen Sie Fluxora nicht.
+
+2. Produkt
+Fluxora ist ein Desktop Mod Manager und Launcher im ModdingFlow Ökosystem. Der Installer entpackt eine portable Version von Fluxora in einen von Ihnen gewählten Ordner und kann auf Wunsch eine Desktop-Verknüpfung erstellen.
+
+3. Lizenz
+Fluxora ist proprietäre Software. Vorbehaltlich dieser Bedingungen erhalten Sie ein beschränktes, widerrufliches, nicht ausschließliches und nicht übertragbares Recht, Fluxora für den vorgesehenen Zweck zu installieren und zu nutzen. Sie erwerben kein Eigentum an Fluxora, Quellcode, Marken, Icons, Assets oder Dokumentation.
+
+4. Beschränkungen
+Soweit zwingendes Recht nichts anderes erlaubt, dürfen Sie Fluxora nicht kopieren, weiterverbreiten, verkaufen, vermieten, unterlizenzieren, veröffentlichen, verändern, zurückentwickeln, dekompilieren, disassemblieren, technische Schutzmaßnahmen umgehen, abgeleitete Werke erstellen oder Fluxora Marken ohne vorherige schriftliche Erlaubnis von ModdingFlow verwenden.
+
+5. Verantwortung des Nutzers
+Sie sind verantwortlich für die Spiele, Mods, Dateien und Pfade, die Sie mit Fluxora verwenden. Sie müssen Spielelizenzen, Plattformregeln, Berechtigungen von Mod-Autoren, Nexus Mods Bedingungen und geltendes Recht einhalten. Fluxora gewährt keine Rechte an Spielen, Mods, Tools, Archiven, APIs oder Inhalten Dritter.
+
+6. Installation und Dateien
+Fluxora schreibt Dateien in den von Ihnen gewählten Installationsordner, speichert Einstellungen und Protokolle lokal und kann eine Desktop-Verknüpfung erstellen. Sie sind dafür verantwortlich, einen Ordner zu wählen, für den Sie Schreibrechte haben. Eine Installation in geschützte Ordner wie Program Files kann Administratorrechte erfordern.
+
+7. Online-Funktionen
+Einige Funktionen können Ihren Browser öffnen, Nexus Mods verbinden, Mod-Hosting-Dienste abrufen, Dateien herunterladen oder nxm Protokollverarbeitung registrieren. Diese Funktionen sind optional und können den Bedingungen, Verfügbarkeiten, API-Änderungen, Limits, Kontoregeln und Netzwerkfehlern Dritter unterliegen.
+
+8. Backups
+Vor dem Importieren, Verschieben, Löschen, Aktivieren oder Deaktivieren von Mods sollten Sie Backups wichtiger Spieldateien, Speicherstände, Profile und Mod-Archive erstellen. Modding kann das Verhalten von Spielen verändern. Fluxora soll diese Abläufe erleichtern, die Verantwortung für das Ergebnis bleibt bei Ihnen.
+
+9. Updates und Änderungen
+Fluxora kann aktualisiert, geändert oder eingestellt werden. Funktionen können hinzugefügt, entfernt oder verändert werden. Die Kompatibilität mit Spielen, Mods, Launchern, APIs oder Betriebssystemversionen wird nicht garantiert.
+
+10. Keine Gewährleistung
+Fluxora wird wie besehen und nach Verfügbarkeit bereitgestellt. Soweit gesetzlich zulässig, schließt ModdingFlow Gewährleistungen für Marktgängigkeit, Eignung für einen bestimmten Zweck, Nichtverletzung von Rechten, ununterbrochenen Betrieb und Fehlerfreiheit aus.
+
+11. Haftungsbeschränkung
+Nichts in diesen Bedingungen beschränkt die Haftung für Vorsatz, grobe Fahrlässigkeit, Verletzung von Leben, Körper oder Gesundheit, zwingende Produkthaftung, arglistig verschwiegene Mängel oder andere Haftung, die nach deutschem oder EU-Recht nicht beschränkt werden darf. In allen anderen Fällen haftet ModdingFlow nur nach Maßgabe des anwendbaren Rechts.
+
+12. Beendigung
+Ihr Nutzungsrecht endet, wenn Sie diese Bedingungen wesentlich verletzen. Sie können die Nutzung jederzeit beenden, indem Sie die installierten Dateien und lokalen Daten löschen.
+
+13. Anwendbares Recht
+Diese Bedingungen unterliegen deutschem Recht, ohne zwingende Verbraucherschutzrechte auszuschließen, die in Ihrem Wohnsitzland gelten. Zuständige Gerichte und Gerichtsstände richten sich nach dem anwendbaren Recht.
+
+14. Kontakt
+Nutzen Sie den offiziellen Kontaktkanal oder das Impressum von ModdingFlow für rechtliche Anfragen, Support und Datenschutzanfragen.

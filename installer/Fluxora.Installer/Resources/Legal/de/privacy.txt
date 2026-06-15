@@ -1,0 +1,68 @@
+Fluxora Datenschutzerklärung
+Stand: 15. Juni 2026
+
+1. Verantwortlicher
+Fluxora wird als Teil des ModdingFlow Ökosystems bereitgestellt. Verantwortlicher für die Datenverarbeitung ist ModdingFlow, Deutschland, sofern in der offiziellen Distribution kein anderer rechtlicher Hinweis angegeben ist. Für Datenschutzanfragen nutzen Sie den offiziellen Kontaktkanal oder das Impressum von ModdingFlow.
+
+2. Geltungsbereich
+Diese Datenschutzerklärung gilt für den Fluxora Installer, den Fluxora Desktop Launcher und den nativen C++ Core von Fluxora. Sie gilt nicht für Drittanbieter, Spielehersteller, Mod-Plattformen, Nexus Mods, Microsoft oder Webseiten, die Sie selbst öffnen.
+
+3. Kurzfassung
+Fluxora ist als lokale Desktop-Anwendung konzipiert. Der Installer erstellt kein Online-Konto und sendet keine Telemetrie. Fluxora speichert Programmdateien, Einstellungen, Projektdaten und Protokolle auf Ihrem Gerät. Netzwerkkommunikation findet nur statt, wenn Sie eine Funktion nutzen, die dies benötigt, zum Beispiel Nexus Mods verbinden, eine Webseite öffnen, nxm Links registrieren, Mod-Daten prüfen oder ausgewählte Dateien herunterladen.
+
+4. Lokal verarbeitete Daten
+Fluxora kann folgende Daten lokal auf Ihrem Gerät speichern oder verarbeiten:
+
+- Installationsdaten: gewählter Installationsordner, installierte Dateien, optionaler Desktop-Link und temporäres Installer-Paket.
+- Einstellungen: Sprache, App-Konfiguration, Ordner für Build-Konfigurationen und weitere Präferenzen.
+- Projektdaten: Projektnamen, Spielpfade, Mod-Ordner, Profildateien, Plugin-Reihenfolge, Download-Einträge, importierte Mod Organizer Daten, ausführbare Dateien und zugehörige Metadaten.
+- Protokolle: Zeitstempel, Status von Vorgängen, Fehlermeldungen, ausgewählte Pfade, Dateinamen, Prozess- oder Thread-Kennungen und Diagnosedaten. Protokolle können indirekt Ihren Windows-Benutzernamen enthalten, wenn er Teil eines Dateipfads ist.
+- Nexus Mods Verbindungsdaten, falls Sie Nexus Mods verbinden: Anzeigename, Benutzer-ID, Token-Typ, Ablaufzeit und mit Windows Datenschutz-APIs geschützte Access- oder Refresh-Tokens, soweit verfügbar.
+- Lokale Protokoll-Links: nxm Links, die an Fluxora übergeben werden, wenn Sie Fluxora als Handler auswählen.
+
+Fluxora erhebt nicht absichtlich besondere Kategorien personenbezogener Daten, Zahlungsdaten, Werbe-IDs, Adressbücher, Browserverläufe, Mikrofon-, Kamera- oder Standortdaten.
+
+5. Zwecke und Rechtsgrundlagen
+Die Rechtsgrundlagen richten sich nach Artikel 6 DSGVO:
+
+- Installation und Ausführung von Fluxora: Artikel 6 Absatz 1 Buchstabe b DSGVO zur Durchführung des Nutzungsverhältnisses und Artikel 6 Absatz 1 Buchstabe f DSGVO aufgrund des berechtigten Interesses an einer funktionsfähigen Desktop-Anwendung.
+- Lokale Einstellungen und Projektdaten: Artikel 6 Absatz 1 Buchstabe b DSGVO, weil diese Daten für angeforderte Funktionen erforderlich sind.
+- Protokolle und Diagnosedaten: Artikel 6 Absatz 1 Buchstabe f DSGVO, berechtigtes Interesse an Sicherheit, Fehlerbehebung, Missbrauchsprävention, Support und Stabilität.
+- Optionale Nexus Mods Verbindung oder andere optionale Online-Aktionen: Artikel 6 Absatz 1 Buchstabe b DSGVO für angeforderte Funktionen und, soweit die Aktion auf Ihrer ausdrücklichen Auswahl beruht, Artikel 6 Absatz 1 Buchstabe a DSGVO. Sie können Nexus Mods in der App trennen.
+- Rechtliche Verpflichtungen, falls einschlägig: Artikel 6 Absatz 1 Buchstabe c DSGVO.
+
+6. Speicherorte
+Fluxora speichert Daten typischerweise lokal an folgenden Orten:
+
+- Installierte Anwendung: der von Ihnen gewählte Installationsordner.
+- Protokolle: ein logs Ordner neben der ausführbaren Datei, sofern beschreibbar, und/oder %APPDATA%\Fluxora\logs.
+- Einstellungen: %APPDATA%\Fluxora\settings.ini und %APPDATA%\Fluxora\settings.json.
+- Projektdateien: von Ihnen beim Erstellen oder Importieren gewählte Ordner.
+- Temporäres Installer-Paket: nur während der Installation im temporären Systemordner.
+
+7. Speicherdauer
+Fluxora speichert lokale Daten, bis Sie diese löschen, Fluxora deinstallieren, die App zurücksetzen, ein Konto trennen oder das betreffende Projekt löschen. Das temporäre Installer-Paket wird nach der Installation gelöscht, soweit dies möglich ist. Protokolle werden als datierte lokale Dateien geschrieben und nicht automatisch hochgeladen. Aktuelle Builds erzwingen keine automatische Löschung von Protokollen; sie bleiben daher gespeichert, bis Sie oder Systembereinigungen sie löschen.
+
+8. Empfänger und Übermittlungen
+Fluxora verkauft keine personenbezogenen Daten und sendet keine Protokolle oder Telemetrie automatisch an ModdingFlow. Daten können nur dann an Dritte übermittelt werden, wenn Sie eine Funktion starten, die dies erfordert, zum Beispiel:
+
+- Nexus Mods OAuth und API-Endpunkte, wenn Sie Nexus Mods verbinden oder Nexus Mods Funktionen nutzen.
+- Eine Download-URL oder ein Mod-Hosting-Dienst, wenn Sie eine Datei herunterladen.
+- Ihr Browser oder Betriebssystem, wenn Fluxora einen Link öffnet oder lokale Protokollverknüpfungen registriert.
+
+Diese Dritten verarbeiten Daten nach ihren eigenen Bedingungen und Datenschutzhinweisen. Fluxora selbst übermittelt Daten nicht absichtlich von Ihrem Gerät, sofern Sie keine optionalen Online-Funktionen nutzen oder Protokolle manuell an den Support senden.
+
+9. Sicherheit
+Fluxora nutzt lokale Dateiberechtigungen von Windows und schützt Nexus Mods OAuth-Tokens mit Windows Datenschutz-APIs, soweit verfügbar. Keine Sicherheitsmaßnahme ist vollkommen. Sie sollten Ihr Windows-Konto, den Installationsordner und Backups schützen.
+
+10. Ihre Rechte nach der DSGVO
+Vorbehaltlich der gesetzlichen Voraussetzungen können Ihnen Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit, Widerspruch und Widerruf einer Einwilligung zustehen. Da Fluxora die meisten Daten lokal auf Ihrem Gerät speichert, können Sie viele Rechte direkt ausüben, indem Sie Protokolle, Einstellungen, Projekte oder den Installationsordner löschen. Für Anfragen an den Verantwortlichen nutzen Sie den offiziellen Datenschutzkontakt von ModdingFlow.
+
+11. Beschwerde
+Sie haben das Recht, sich bei einer zuständigen Datenschutzaufsichtsbehörde zu beschweren, insbesondere in dem EU-Mitgliedstaat Ihres Aufenthaltsorts, Arbeitsplatzes oder des Orts des mutmaßlichen Verstoßes. In Deutschland ist in der Regel die Aufsichtsbehörde Ihres Bundeslandes zuständig.
+
+12. Kinder
+Fluxora richtet sich nicht an Kinder. Nutzt ein Kind Fluxora, sind Eltern oder gesetzliche Vertreter dafür verantwortlich, dass die Nutzung rechtmäßig und angemessen ist.
+
+13. Änderungen
+Diese Datenschutzerklärung kann aktualisiert werden, wenn Fluxora seine Datenverarbeitung ändert, neue Online-Funktionen hinzukommen oder rechtliche Anforderungen sich ändern. Die im Installer enthaltene Version ist die Version, die vor der Installation angezeigt wird.

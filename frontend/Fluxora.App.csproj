@@ -6,14 +6,21 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
-    <AssemblyName>Fluxora.App</AssemblyName>
+    <AssemblyName>FluxoraModding</AssemblyName>
     <RootNamespace>Fluxora.App</RootNamespace>
     <ApplicationIcon>..\Icons\Fluxora.ico</ApplicationIcon>
+    <SatelliteResourceLanguages>en;ru;de</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="SharpVectors.Wpf" Version="1.8.5" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Resource Include="..\Icons\Fluxora.ico" Link="Fluxora.ico" />
+    <Resource Include="..\Icons\Fluxora.png" Link="Fluxora.png" />
     <Resource Include="..\Icons\*.svg" LinkBase="Assets\Icons" />
+    <Resource Include="..\installer\Fluxora.Installer\Assets\Emoji\*.svg" LinkBase="Assets\Emoji" />
     <Resource Include="Assets\Images\*.png" />
     <!-- Embedded brand typefaces (Unbounded = display/headings, Onest = body/UI).
          Both cover Latin + Cyrillic + German, so RU/EN/DE render in-brand.

@@ -1,0 +1,44 @@
+Fluxora Terms of Use
+Last updated: 15 June 2026
+
+1. Acceptance
+By installing or using Fluxora, you agree to these Terms of Use and to the Fluxora Privacy Policy. If you do not agree, do not install or use Fluxora.
+
+2. Product
+Fluxora is a desktop mod manager and launcher in the ModdingFlow ecosystem. The installer unpacks a portable version of Fluxora into a folder selected by you and may create a desktop shortcut if you choose that option.
+
+3. License
+Fluxora is proprietary software. Subject to these terms, you receive a limited, revocable, non-exclusive, non-transferable right to install and use Fluxora for its intended purpose. You do not receive ownership of Fluxora, its source code, branding, icons, assets or documentation.
+
+4. Restrictions
+Unless mandatory law allows otherwise, you must not copy, redistribute, sell, lease, sublicense, publish, modify, reverse engineer, decompile, disassemble, bypass technical measures, create derivative works from, or use Fluxora branding without prior written permission from ModdingFlow.
+
+5. User responsibility
+You are responsible for the games, mods, files and paths you use with Fluxora. You must comply with game licenses, platform rules, mod author permissions, Nexus Mods terms and applicable law. Fluxora does not grant rights to third-party games, mods, tools, archives, APIs or content.
+
+6. Installation and files
+Fluxora writes files into the installation folder you choose, stores settings and logs locally, and may create a desktop shortcut. You are responsible for choosing a folder where you have permission to write. Installing into protected folders such as Program Files may require administrator rights.
+
+7. Online features
+Some features may open your browser, connect to Nexus Mods, access mod hosting services, download files or register nxm protocol handling. Those features are optional and may be subject to third-party terms, availability limits, API changes, rate limits, account rules and network errors.
+
+8. Backups
+Before importing, moving, deleting, enabling or disabling mods, you should keep backups of important game files, save files, profiles and mod archives. Modding workflows can affect game behavior. Fluxora is provided to help manage those workflows, but you remain responsible for the result.
+
+9. Updates and changes
+Fluxora may be updated, changed or discontinued. Features may be added, removed or modified. Compatibility with games, mods, launchers, APIs or operating system versions is not guaranteed.
+
+10. No warranty
+Fluxora is provided as is and as available. To the maximum extent permitted by law, ModdingFlow excludes warranties of merchantability, fitness for a particular purpose, non-infringement, uninterrupted operation and error-free operation.
+
+11. Limitation of liability
+Nothing in these terms limits liability for intent, gross negligence, injury to life, body or health, mandatory product liability, fraudulently concealed defects or any liability that cannot be limited under German or EU law. In all other cases, ModdingFlow is liable only as required by applicable law.
+
+12. Termination
+Your right to use Fluxora ends if you materially breach these terms. You may stop using Fluxora at any time by deleting the installed files and local data.
+
+13. Governing law
+These terms are governed by German law, without excluding mandatory consumer protection rules that apply in your country of residence. Courts and venues are determined by applicable law.
+
+14. Contact
+Use the official ModdingFlow contact channel or legal notice for legal, support and privacy requests.

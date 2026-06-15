@@ -13,6 +13,7 @@ public partial class BuildSettingsWindow : Window
     public BuildSettingsWindow(
         CoreBridgeService coreBridgeService,
         IFolderPickerService folderPickerService,
+        IExecutablePickerService executablePickerService,
         ModProject project)
     {
         InitializeComponent();
@@ -21,11 +22,12 @@ public partial class BuildSettingsWindow : Window
         viewModel = new BuildSettingsWindowViewModel(
             coreBridgeService,
             folderPickerService,
+            executablePickerService,
             project);
         DataContext = viewModel;
     }
 
-    public BuildPathSettings? SavedSettings => viewModel.SavedSettings;
+    public BuildSettingsResult? SavedResult => viewModel.SavedResult;
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {

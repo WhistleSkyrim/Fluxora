@@ -1,0 +1,1257 @@
+<Window x:Class="Fluxora.Installer.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        xmlns:controls="clr-namespace:Fluxora.App.Controls"
+        xmlns:models="clr-namespace:Fluxora.Installer.Models"
+        xmlns:svgc="http://sharpvectors.codeplex.com/svgc/"
+        Title="Fluxora Setup"
+        Width="940"
+        Height="780"
+        MinWidth="860"
+        MinHeight="700"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        Background="#0B0914"
+        Icon="pack://application:,,,/Fluxora.ico"
+        FontFamily="{StaticResource FluxoraFontBody}"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType"
+        RenderOptions.ClearTypeHint="Enabled"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True"
+        SourceInitialized="OnSourceInitialized"
+        Closed="OnClosed">
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="0"
+                            CornerRadius="16"
+                            GlassFrameThickness="0"
+                            ResizeBorderThickness="6"
+                            UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <SolidColorBrush x:Key="TextBrush" Color="#F7F4FF" />
+        <SolidColorBrush x:Key="TextSecondaryBrush" Color="#C5BEDA" />
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#928BAA" />
+        <SolidColorBrush x:Key="PanelBrush" Color="#171523" />
+        <SolidColorBrush x:Key="PanelRaisedBrush" Color="#201D31" />
+        <SolidColorBrush x:Key="PanelSoftBrush" Color="#11101B" />
+        <SolidColorBrush x:Key="PanelHoverBrush" Color="#27223A" />
+        <SolidColorBrush x:Key="LineBrush" Color="#302B46" />
+        <SolidColorBrush x:Key="LineHoverBrush" Color="#55467D" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#8B5CF6" />
+        <SolidColorBrush x:Key="AccentHoverBrush" Color="#A78BFA" />
+        <SolidColorBrush x:Key="AccentSoftBrush" Color="#261B42" />
+        <SolidColorBrush x:Key="SuccessBrush" Color="#22C55E" />
+        <SolidColorBrush x:Key="DangerBrush" Color="#FB7185" />
+
+        <LinearGradientBrush x:Key="WindowBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#21183A" Offset="0" />
+            <GradientStop Color="#0B0914" Offset="0.46" />
+            <GradientStop Color="#171124" Offset="1" />
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="AccentGradientBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#F7F4FF" Offset="0" />
+            <GradientStop Color="#C4B5FD" Offset="0.48" />
+            <GradientStop Color="#7C3AED" Offset="1" />
+        </LinearGradientBrush>
+
+        <Style x:Key="CaptionButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="Width" Value="34" />
+            <Setter Property="Height" Value="34" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="9">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.7" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="InstallerButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="Height" Value="42" />
+            <Setter Property="MinWidth" Value="118" />
+            <Setter Property="Padding" Value="18,0" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="11"
+                                RenderTransformOrigin="0.5,0.5">
+                            <Border.RenderTransform>
+                                <ScaleTransform ScaleX="1" ScaleY="1" />
+                            </Border.RenderTransform>
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <EventTrigger RoutedEvent="MouseEnter">
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                         To="1.015"
+                                                         Duration="0:0:0.12" />
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                         To="1.015"
+                                                         Duration="0:0:0.12" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                            <EventTrigger RoutedEvent="MouseLeave">
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                         To="1"
+                                                         Duration="0:0:0.14" />
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                         To="1"
+                                                         Duration="0:0:0.14" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.78" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.45" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ScrollBarRepeatButtonStyle" TargetType="{x:Type RepeatButton}">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type RepeatButton}">
+                        <Border Background="Transparent" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="InstallerThumbStyle" TargetType="{x:Type Thumb}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Thumb}">
+                        <Border x:Name="ThumbRoot"
+                                Width="7"
+                                HorizontalAlignment="Center"
+                                Background="#625681"
+                                CornerRadius="4" />
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ThumbRoot" Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="ThumbRoot" Property="Background" Value="{StaticResource AccentBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="InstallerScrollBarStyle" TargetType="{x:Type ScrollBar}">
+            <Setter Property="Width" Value="12" />
+            <Setter Property="MinWidth" Value="12" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ScrollBar}">
+                        <Grid Background="{TemplateBinding Background}">
+                            <Border Width="7"
+                                    HorizontalAlignment="Center"
+                                    Background="#1B1729"
+                                    CornerRadius="4" />
+                            <Track x:Name="PART_Track"
+                                   IsDirectionReversed="True">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="{x:Static ScrollBar.PageUpCommand}"
+                                                  Style="{StaticResource ScrollBarRepeatButtonStyle}" />
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource InstallerThumbStyle}" />
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="{x:Static ScrollBar.PageDownCommand}"
+                                                  Style="{StaticResource ScrollBarRepeatButtonStyle}" />
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PrimaryButtonStyle"
+               TargetType="{x:Type Button}"
+               BasedOn="{StaticResource InstallerButtonStyle}">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+            <Setter Property="Foreground" Value="#FFFFFF" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SecondaryButtonStyle"
+               TargetType="{x:Type Button}"
+               BasedOn="{StaticResource InstallerButtonStyle}">
+            <Setter Property="Background" Value="{StaticResource PanelRaisedBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                    <Setter Property="BorderBrush" Value="{StaticResource LineHoverBrush}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="TabButtonStyle"
+               TargetType="{x:Type Button}"
+               BasedOn="{StaticResource SecondaryButtonStyle}">
+            <Setter Property="Height" Value="36" />
+            <Setter Property="MinWidth" Value="150" />
+            <Setter Property="Padding" Value="14,0" />
+        </Style>
+
+        <Style x:Key="InputTextBoxStyle" TargetType="{x:Type TextBox}">
+            <Setter Property="Height" Value="44" />
+            <Setter Property="Padding" Value="14,0" />
+            <Setter Property="Background" Value="{StaticResource PanelSoftBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="CaretBrush" Value="{StaticResource AccentHoverBrush}" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TextBox}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="11">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="InstallerCheckBoxStyle" TargetType="{x:Type CheckBox}">
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type CheckBox}">
+                        <StackPanel Orientation="Horizontal">
+                            <Border x:Name="Box"
+                                    Width="20"
+                                    Height="20"
+                                    CornerRadius="6"
+                                    BorderBrush="{StaticResource LineHoverBrush}"
+                                    BorderThickness="1"
+                                    Background="{StaticResource PanelSoftBrush}"
+                                    Margin="0,0,10,0"
+                                    RenderTransformOrigin="0.5,0.5">
+                                <Border.RenderTransform>
+                                    <ScaleTransform ScaleX="1" ScaleY="1" />
+                                </Border.RenderTransform>
+                                <Path x:Name="Check"
+                                      Data="M5 10.5 8.4 14 15 6.5"
+                                      Stroke="#FFFFFF"
+                                      StrokeThickness="2"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round"
+                                      Opacity="0"
+                                      RenderTransformOrigin="0.5,0.5">
+                                    <Path.RenderTransform>
+                                        <ScaleTransform ScaleX="0.6" ScaleY="0.6" />
+                                    </Path.RenderTransform>
+                                </Path>
+                            </Border>
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Box" Property="Background" Value="{StaticResource AccentBrush}" />
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                                <Setter TargetName="Check" Property="Opacity" Value="1" />
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="Box"
+                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                             To="1.08"
+                                                             Duration="0:0:0.09"
+                                                             AutoReverse="True" />
+                                            <DoubleAnimation Storyboard.TargetName="Box"
+                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                             To="1.08"
+                                                             Duration="0:0:0.09"
+                                                             AutoReverse="True" />
+                                            <DoubleAnimation Storyboard.TargetName="Check"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             From="0"
+                                                             To="1"
+                                                             Duration="0:0:0.14" />
+                                            <DoubleAnimation Storyboard.TargetName="Check"
+                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                             From="0.6"
+                                                             To="1"
+                                                             Duration="0:0:0.16" />
+                                            <DoubleAnimation Storyboard.TargetName="Check"
+                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                             From="0.6"
+                                                             To="1"
+                                                             Duration="0:0:0.16" />
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="Check"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             To="0"
+                                                             Duration="0:0:0.10" />
+                                            <DoubleAnimation Storyboard.TargetName="Check"
+                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                             To="0.6"
+                                                             Duration="0:0:0.10" />
+                                            <DoubleAnimation Storyboard.TargetName="Check"
+                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                             To="0.6"
+                                                             Duration="0:0:0.10" />
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="LanguageOptionTemplate" DataType="{x:Type models:InstallerLanguage}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="42" />
+                    <ColumnDefinition Width="14" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Image Width="32"
+                       Height="32"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Center"
+                       Stretch="Uniform"
+                       RenderOptions.BitmapScalingMode="HighQuality">
+                        <Image.Style>
+                            <Style TargetType="{x:Type Image}">
+                                <Setter Property="Source"
+                                        Value="{svgc:SvgImage Source=/Assets/Emoji/flag_us.svg, AppName=FluxoraSetup}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Code}" Value="de">
+                                        <Setter Property="Source"
+                                                Value="{svgc:SvgImage Source=/Assets/Emoji/flag_de.svg, AppName=FluxoraSetup}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Code}" Value="ru">
+                                        <Setter Property="Source"
+                                                Value="{svgc:SvgImage Source=/Assets/Emoji/flag_ru.svg, AppName=FluxoraSetup}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Image.Style>
+                </Image>
+
+                <TextBlock Grid.Column="2"
+                           Text="{Binding DisplayName}"
+                           VerticalAlignment="Center"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Foreground="{StaticResource TextBrush}" />
+            </Grid>
+        </DataTemplate>
+
+        <Style x:Key="LanguageComboBoxItemStyle" TargetType="{x:Type ComboBoxItem}">
+            <Setter Property="Height" Value="52" />
+            <Setter Property="Padding" Value="12,0" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ComboBoxItem}">
+                        <Border x:Name="Root"
+                                Background="Transparent"
+                                BorderBrush="Transparent"
+                                BorderThickness="1"
+                                CornerRadius="11"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#3B3158" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="LanguageComboBoxStyle" TargetType="{x:Type ComboBox}">
+            <Setter Property="Width" Value="470" />
+            <Setter Property="Height" Value="58" />
+            <Setter Property="Background" Value="{StaticResource PanelSoftBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ComboBox}">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton"
+                                          Focusable="False"
+                                          ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                                        <Border x:Name="Root"
+                                                Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderThickness="1"
+                                                CornerRadius="15">
+                                            <Grid>
+                                                <ContentPresenter Margin="14,0,54,0"
+                                                                  VerticalAlignment="Center"
+                                                                  HorizontalAlignment="Stretch"
+                                                                  Content="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                                  ContentTemplate="{Binding ItemTemplate, RelativeSource={RelativeSource AncestorType=ComboBox}}" />
+                                                <Path x:Name="Arrow"
+                                                      Width="12"
+                                                      Height="8"
+                                                      HorizontalAlignment="Right"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,20,0"
+                                                      Data="M1 1.5 L6 6.5 L11 1.5"
+                                                      Stroke="{StaticResource TextSecondaryBrush}"
+                                                      StrokeThickness="2"
+                                                      StrokeStartLineCap="Round"
+                                                      StrokeEndLineCap="Round"
+                                                      RenderTransformOrigin="0.5,0.5">
+                                                    <Path.RenderTransform>
+                                                        <RotateTransform Angle="0" />
+                                                    </Path.RenderTransform>
+                                                </Path>
+                                            </Grid>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource LineHoverBrush}" />
+                                            </Trigger>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                                                <Trigger.EnterActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetName="Arrow"
+                                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                                             To="180"
+                                                                             Duration="0:0:0.18" />
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </Trigger.EnterActions>
+                                                <Trigger.ExitActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetName="Arrow"
+                                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                                             To="0"
+                                                                             Duration="0:0:0.18" />
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </Trigger.ExitActions>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Bottom"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   PopupAnimation="Fade">
+                                <Border x:Name="DropDown"
+                                        Margin="0,8,0,0"
+                                        Width="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                        MaxHeight="180"
+                                        Background="{StaticResource PanelSoftBrush}"
+                                        BorderBrush="{StaticResource LineHoverBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="15"
+                                        Padding="7"
+                                        SnapsToDevicePixels="True"
+                                        Opacity="0"
+                                        RenderTransformOrigin="0.5,0">
+                                    <Border.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform ScaleX="0.98" ScaleY="0.92" />
+                                            <TranslateTransform Y="-8" />
+                                        </TransformGroup>
+                                    </Border.RenderTransform>
+                                    <Border.Triggers>
+                                        <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                            <BeginStoryboard>
+                                                <Storyboard>
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="Opacity"
+                                                                     To="1"
+                                                                     Duration="0:0:0.14" />
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)"
+                                                                     To="1"
+                                                                     Duration="0:0:0.18" />
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)"
+                                                                     To="1"
+                                                                     Duration="0:0:0.18" />
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)"
+                                                                     To="0"
+                                                                     Duration="0:0:0.18" />
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </EventTrigger>
+                                    </Border.Triggers>
+                                    <ScrollViewer CanContentScroll="True"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  VerticalScrollBarVisibility="Disabled">
+                                        <ItemsPresenter />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="InstallerProgressBarStyle" TargetType="{x:Type ProgressBar}">
+            <Setter Property="Height" Value="9" />
+            <Setter Property="Foreground" Value="{StaticResource AccentGradientBrush}" />
+            <Setter Property="Background" Value="#211B34" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ProgressBar}">
+                        <Grid ClipToBounds="True">
+                            <Border Background="{TemplateBinding Background}" CornerRadius="4.5" />
+                            <Border x:Name="PART_Track" Background="Transparent" CornerRadius="4.5" />
+                            <Border x:Name="PART_Indicator"
+                                    HorizontalAlignment="Left"
+                                    Background="{TemplateBinding Foreground}"
+                                    CornerRadius="4.5" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource WindowBrush}">
+        <Border BorderBrush="#30264A"
+                BorderThickness="1" />
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="48" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="74" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0"
+                  Background="Transparent"
+                  MouseLeftButtonDown="OnDragMove">
+                <StackPanel Orientation="Horizontal"
+                            VerticalAlignment="Center"
+                            Margin="22,0,0,0">
+                    <Image Source="pack://application:,,,/Fluxora.png"
+                           Width="24"
+                           Height="24"
+                           Stretch="Uniform"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock x:Name="WindowTitleText"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center"
+                               FontWeight="Black"
+                               FontSize="13"
+                               Foreground="{StaticResource TextBrush}" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Margin="0,0,14,0">
+                    <Button Style="{StaticResource CaptionButtonStyle}"
+                            Click="OnMinimizeClick">
+                        <controls:LineIcon Width="15"
+                                           Height="15"
+                                           Data="{StaticResource Icon.WindowMinimize}"
+                                           Foreground="{Binding RelativeSource={RelativeSource AncestorType=Button}, Path=Foreground}" />
+                    </Button>
+                    <Button Style="{StaticResource CaptionButtonStyle}"
+                            Click="OnCloseClick">
+                        <controls:LineIcon Width="15"
+                                           Height="15"
+                                           Data="{StaticResource Icon.WindowClose}"
+                                           Foreground="{Binding RelativeSource={RelativeSource AncestorType=Button}, Path=Foreground}" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="28,16,28,18">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="250" />
+                    <ColumnDefinition Width="26" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0"
+                        Background="#A611101B"
+                        BorderBrush="{StaticResource LineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="16"
+                        Padding="24">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="30" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel>
+                            <Border Width="58"
+                                    Height="58"
+                                    HorizontalAlignment="Left"
+                                    CornerRadius="17"
+                                    Background="Transparent"
+                                    BorderThickness="0">
+                                <Image Source="pack://application:,,,/Fluxora.png"
+                                       Width="46"
+                                       Height="46"
+                                       Stretch="Uniform"
+                                       RenderOptions.BitmapScalingMode="HighQuality" />
+                            </Border>
+
+                            <TextBlock x:Name="AppNameText"
+                                       Margin="0,18,0,0"
+                                       FontSize="27"
+                                       FontWeight="Black"
+                                       Foreground="{StaticResource TextBrush}" />
+                            <TextBlock x:Name="AppSubtitleText"
+                                       Margin="0,6,0,0"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextSecondaryBrush}" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="2"
+                                    VerticalAlignment="Top">
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="34" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="StepDot0"
+                                        Width="28"
+                                        Height="28"
+                                        CornerRadius="9"
+                                        Background="{StaticResource AccentBrush}">
+                                    <TextBlock Text="1"
+                                               FontWeight="Black"
+                                               Foreground="#FFFFFF"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock x:Name="StepText0"
+                                           Grid.Column="1"
+                                           VerticalAlignment="Center"
+                                           FontWeight="Black"
+                                           Foreground="{StaticResource TextBrush}" />
+                            </Grid>
+
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="34" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="StepDot1"
+                                        Width="28"
+                                        Height="28"
+                                        CornerRadius="9"
+                                        Background="{StaticResource PanelRaisedBrush}">
+                                    <TextBlock Text="2"
+                                               FontWeight="Black"
+                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock x:Name="StepText1"
+                                           Grid.Column="1"
+                                           VerticalAlignment="Center"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
+                            </Grid>
+
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="34" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="StepDot2"
+                                        Width="28"
+                                        Height="28"
+                                        CornerRadius="9"
+                                        Background="{StaticResource PanelRaisedBrush}">
+                                    <TextBlock Text="3"
+                                               FontWeight="Black"
+                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock x:Name="StepText2"
+                                           Grid.Column="1"
+                                           VerticalAlignment="Center"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
+                            </Grid>
+
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="34" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="StepDot3"
+                                        Width="28"
+                                        Height="28"
+                                        CornerRadius="9"
+                                        Background="{StaticResource PanelRaisedBrush}">
+                                    <TextBlock Text="4"
+                                               FontWeight="Black"
+                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock x:Name="StepText3"
+                                           Grid.Column="1"
+                                           VerticalAlignment="Center"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
+                            </Grid>
+
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="34" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="StepDot4"
+                                        Width="28"
+                                        Height="28"
+                                        CornerRadius="9"
+                                        Background="{StaticResource PanelRaisedBrush}">
+                                    <TextBlock Text="5"
+                                               FontWeight="Black"
+                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock x:Name="StepText4"
+                                           Grid.Column="1"
+                                           VerticalAlignment="Center"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
+                            </Grid>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Column="2"
+                        Background="{StaticResource PanelBrush}"
+                        BorderBrush="{StaticResource LineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="16"
+                        Padding="34,28">
+                    <Grid>
+                        <Grid x:Name="StepLanguagePanel">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="18" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="14" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="28" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <controls:LineIcon Width="32"
+                                               Height="32"
+                                               Data="{StaticResource Icon.Language}"
+                                               Foreground="{StaticResource AccentHoverBrush}"
+                                               StrokeThickness="1.8" />
+                            <TextBlock x:Name="LanguageTitleText"
+                                       Grid.Row="2"
+                                       FontSize="30"
+                                       FontWeight="Black"
+                                       Foreground="{StaticResource TextBrush}"
+                                       TextWrapping="Wrap"
+                                       Height="76"
+                                       LineHeight="36" />
+                            <TextBlock x:Name="LanguageBodyText"
+                                       Grid.Row="4"
+                                       FontSize="14"
+                                       LineHeight="22"
+                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                       TextWrapping="Wrap"
+                                       MaxWidth="570"
+                                       Height="50" />
+
+                            <ComboBox x:Name="LanguageComboBox"
+                                      Grid.Row="6"
+                                      HorizontalAlignment="Left"
+                                      Style="{StaticResource LanguageComboBoxStyle}"
+                                      ItemContainerStyle="{StaticResource LanguageComboBoxItemStyle}"
+                                      ItemTemplate="{StaticResource LanguageOptionTemplate}"
+                                      SelectionChanged="OnLanguageSelectionChanged" />
+                        </Grid>
+
+                        <Grid x:Name="StepLegalPanel" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="12" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="14" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="18" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="14" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="18" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <controls:LineIcon Width="32"
+                                               Height="32"
+                                               Data="{StaticResource Icon.FileText}"
+                                               Foreground="{StaticResource AccentHoverBrush}"
+                                               StrokeThickness="1.8" />
+                            <TextBlock x:Name="LegalTitleText"
+                                       Grid.Row="2"
+                                       FontSize="28"
+                                       FontWeight="Black"
+                                       Foreground="{StaticResource TextBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock x:Name="LegalBodyText"
+                                       Grid.Row="4"
+                                       FontSize="13.5"
+                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                       TextWrapping="Wrap"
+                                       LineHeight="20" />
+
+                            <StackPanel Grid.Row="6" Orientation="Horizontal">
+                                <Button x:Name="PrivacyTabButton"
+                                        Style="{StaticResource TabButtonStyle}"
+                                        Margin="0,0,10,0"
+                                        Click="OnPrivacyTabClick" />
+                                <Button x:Name="TermsTabButton"
+                                        Style="{StaticResource TabButtonStyle}"
+                                        Click="OnTermsTabClick" />
+                            </StackPanel>
+
+                            <Border Grid.Row="8"
+                                    Height="292"
+                                    Background="{StaticResource PanelSoftBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="14"
+                                    Padding="18,18,10,18">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              Padding="0,0,6,0">
+                                    <ScrollViewer.Resources>
+                                        <Style TargetType="{x:Type ScrollBar}"
+                                               BasedOn="{StaticResource InstallerScrollBarStyle}" />
+                                    </ScrollViewer.Resources>
+                                    <TextBlock x:Name="LegalDocumentText"
+                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                               FontSize="12.5"
+                                               LineHeight="20"
+                                               TextWrapping="Wrap" />
+                                </ScrollViewer>
+                            </Border>
+
+                            <StackPanel Grid.Row="10">
+                                <CheckBox x:Name="AcceptPrivacyCheckBox"
+                                          Style="{StaticResource InstallerCheckBoxStyle}"
+                                          Checked="OnLegalAcceptanceChanged"
+                                          Unchecked="OnLegalAcceptanceChanged" />
+                                <CheckBox x:Name="AcceptTermsCheckBox"
+                                          Margin="0,12,0,0"
+                                          Style="{StaticResource InstallerCheckBoxStyle}"
+                                          Checked="OnLegalAcceptanceChanged"
+                                          Unchecked="OnLegalAcceptanceChanged" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid x:Name="StepTargetPanel" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="18" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="18" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="28" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="20" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <controls:LineIcon Width="32"
+                                               Height="32"
+                                               Data="{StaticResource Icon.Folder}"
+                                               Foreground="{StaticResource AccentHoverBrush}"
+                                               StrokeThickness="1.8" />
+                            <TextBlock x:Name="TargetTitleText"
+                                       Grid.Row="2"
+                                       FontSize="30"
+                                       FontWeight="Black"
+                                       Foreground="{StaticResource TextBrush}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock x:Name="TargetBodyText"
+                                       Grid.Row="4"
+                                       FontSize="14"
+                                       LineHeight="22"
+                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                       TextWrapping="Wrap"
+                                       MaxWidth="570" />
+
+                            <StackPanel Grid.Row="6">
+                                <TextBlock x:Name="TargetLabelText"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource MutedTextBrush}" />
+                                <Grid Margin="0,8,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="12" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="InstallPathTextBox"
+                                             Style="{StaticResource InputTextBoxStyle}"
+                                             TextChanged="OnInstallPathChanged" />
+                                    <Button x:Name="BrowseButton"
+                                            Grid.Column="2"
+                                            Style="{StaticResource SecondaryButtonStyle}"
+                                            Click="OnBrowseClick" />
+                                </Grid>
+                            </StackPanel>
+
+                            <CheckBox x:Name="ShortcutCheckBox"
+                                      Grid.Row="8"
+                                      IsChecked="True"
+                                      Style="{StaticResource InstallerCheckBoxStyle}" />
+
+                            <Border Grid.Row="8"
+                                    Margin="0,54,0,0"
+                                    Background="{StaticResource AccentSoftBrush}"
+                                    BorderBrush="{StaticResource LineHoverBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="14"
+                                    Padding="16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="12" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <controls:LineIcon Width="20"
+                                                       Height="20"
+                                                       Data="{StaticResource Icon.HardDrive}"
+                                                       Foreground="{StaticResource AccentHoverBrush}"
+                                                       StrokeThickness="1.8" />
+                                    <TextBlock x:Name="TargetHintText"
+                                               Grid.Column="2"
+                                               FontSize="12.5"
+                                               LineHeight="19"
+                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </Grid>
+
+                        <Grid x:Name="StepProgressPanel" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <StackPanel Grid.Row="1"
+                                        HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Center">
+                                <Grid Width="116"
+                                      Height="116"
+                                      HorizontalAlignment="Center">
+                                    <Ellipse Width="92"
+                                             Height="92"
+                                             Stroke="#2B2444"
+                                             StrokeThickness="7" />
+                                    <Ellipse Width="92"
+                                             Height="92"
+                                             Stroke="{StaticResource AccentHoverBrush}"
+                                             StrokeThickness="7"
+                                             StrokeStartLineCap="Round"
+                                             StrokeEndLineCap="Round"
+                                             StrokeDashCap="Round"
+                                             StrokeDashArray="5.8 13.4"
+                                             RenderTransformOrigin="0.5,0.5">
+                                        <Ellipse.RenderTransform>
+                                            <RotateTransform x:Name="ProgressArcRotate" />
+                                        </Ellipse.RenderTransform>
+                                        <Ellipse.Triggers>
+                                            <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                                <BeginStoryboard>
+                                                    <Storyboard RepeatBehavior="Forever">
+                                                        <DoubleAnimation Storyboard.TargetName="ProgressArcRotate"
+                                                                         Storyboard.TargetProperty="Angle"
+                                                                         From="-24"
+                                                                         To="696"
+                                                                         Duration="0:0:2.4" />
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </EventTrigger>
+                                        </Ellipse.Triggers>
+                                    </Ellipse>
+                                    <Border Width="34"
+                                            Height="34"
+                                            CornerRadius="17"
+                                            Background="{StaticResource AccentGradientBrush}"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center" />
+                                </Grid>
+
+                                <TextBlock x:Name="ProgressTitleText"
+                                           Margin="0,24,0,0"
+                                           HorizontalAlignment="Center"
+                                           FontSize="28"
+                                           FontWeight="Black"
+                                           Foreground="{StaticResource TextBrush}"
+                                           TextAlignment="Center" />
+                                <TextBlock x:Name="ProgressDetailText"
+                                           Margin="0,8,0,0"
+                                           HorizontalAlignment="Center"
+                                           FontSize="13"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           TextAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           MaxWidth="520" />
+
+                                <Grid Margin="0,34,0,0">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="9" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid>
+                                        <TextBlock x:Name="ProgressPhaseText"
+                                                   FontSize="11.5"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   HorizontalAlignment="Left" />
+                                        <TextBlock x:Name="ProgressPercentText"
+                                                   FontSize="11.5"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{StaticResource TextSecondaryBrush}"
+                                                   HorizontalAlignment="Right" />
+                                    </Grid>
+                                    <ProgressBar x:Name="InstallProgressBar"
+                                                 Grid.Row="2"
+                                                 Minimum="0"
+                                                 Maximum="100"
+                                                 Value="0"
+                                                 Style="{StaticResource InstallerProgressBarStyle}" />
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid x:Name="StepResultPanel" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <StackPanel Grid.Row="1"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center">
+                                <Border x:Name="ResultIconBackground"
+                                        Width="92"
+                                        Height="92"
+                                        CornerRadius="28"
+                                        Background="{StaticResource AccentSoftBrush}"
+                                        BorderBrush="{StaticResource LineHoverBrush}"
+                                        BorderThickness="1"
+                                        HorizontalAlignment="Center">
+                                    <controls:LineIcon x:Name="ResultIcon"
+                                                       Width="44"
+                                                       Height="44"
+                                                       Data="{StaticResource Icon.ConflictPlus}"
+                                                       Foreground="{StaticResource SuccessBrush}"
+                                                       StrokeThickness="2.2" />
+                                </Border>
+                                <TextBlock x:Name="ResultTitleText"
+                                           Margin="0,24,0,0"
+                                           FontSize="30"
+                                           FontWeight="Black"
+                                           Foreground="{StaticResource TextBrush}"
+                                           TextAlignment="Center" />
+                                <TextBlock x:Name="ResultDetailText"
+                                           Margin="0,9,0,0"
+                                           FontSize="13.5"
+                                           LineHeight="21"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           TextAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           MaxWidth="540" />
+                                <StackPanel x:Name="ResultActionPanel"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Center"
+                                            Margin="0,28,0,0">
+                                    <Button x:Name="LaunchButton"
+                                            Style="{StaticResource PrimaryButtonStyle}"
+                                            Margin="0,0,10,0"
+                                            Click="OnLaunchClick" />
+                                    <Button x:Name="OpenFolderButton"
+                                            Style="{StaticResource SecondaryButtonStyle}"
+                                            Click="OnOpenFolderClick" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <Border Grid.Row="2"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="0,1,0,0"
+                    Background="#660B0914">
+                <Grid Margin="28,0">
+                    <Button x:Name="CancelButton"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource SecondaryButtonStyle}"
+                            Click="OnCloseClick" />
+
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center">
+                        <Button x:Name="BackButton"
+                                Style="{StaticResource SecondaryButtonStyle}"
+                                Margin="0,0,10,0"
+                                Click="OnBackClick" />
+                        <Button x:Name="NextButton"
+                                Style="{StaticResource PrimaryButtonStyle}"
+                                Click="OnNextClick" />
+                        <Button x:Name="InstallButton"
+                                Style="{StaticResource PrimaryButtonStyle}"
+                                Visibility="Collapsed"
+                                Click="OnInstallClick" />
+                        <Button x:Name="CloseResultButton"
+                                Style="{StaticResource PrimaryButtonStyle}"
+                                Visibility="Collapsed"
+                                Click="OnCloseClick" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

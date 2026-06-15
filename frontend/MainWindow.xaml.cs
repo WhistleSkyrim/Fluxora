@@ -15,6 +15,7 @@ public partial class MainWindow : Window
     private readonly SettingsService settingsService;
     private readonly LanguageCatalogService languageCatalogService;
     private readonly IFolderPickerService folderPickerService;
+    private readonly IExecutablePickerService executablePickerService;
     private readonly MainWindowViewModel viewModel;
     private readonly ModOrderDragDropService modOrderDragDropService;
     private readonly PluginOrderDragDropService pluginOrderDragDropService;
@@ -36,6 +37,7 @@ public partial class MainWindow : Window
         this.settingsService = settingsService;
         this.languageCatalogService = languageCatalogService;
         folderPickerService = new FolderPickerService();
+        executablePickerService = new ExecutablePickerService();
         DownloadCatalogService downloadCatalogService = new(this.coreBridgeService);
         NxmProtocolService nxmProtocolService = new(this.coreBridgeService);
         ModCatalogService modCatalogService = new(this.coreBridgeService);
@@ -60,11 +62,12 @@ public partial class MainWindow : Window
             settingsService,
             languageCatalogService,
             folderPickerService,
+            executablePickerService,
             new BuildConfigPickerService(),
             new ModArchivePickerService(),
             new ModInstallDialogService(),
             new ExecutableManagerDialogService(coreBridgeService),
-            new BuildSettingsDialogService(coreBridgeService, folderPickerService),
+            new BuildSettingsDialogService(coreBridgeService, folderPickerService, executablePickerService),
             new BuildDeletionDialogService());
 
         DataContext = viewModel;

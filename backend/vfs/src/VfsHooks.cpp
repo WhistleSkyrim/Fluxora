@@ -6,10 +6,12 @@
 
 #include <detours.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace fluxora::vfs
@@ -19,9 +21,14 @@ namespace fluxora::vfs
     namespace
     {
         // --- global state ---------------------------------------------------
-        VfsTree g_tree;
-        std::wstring g_targetLower;
-        std::wstring g_overwrite;
+        struct RuntimeMount
+        {
+            VfsTree tree;
+            std::wstring targetLower;
+            std::wstring overwrite;
+        };
+
+        std::vector<RuntimeMount> g_mounts;
         std::string g_hookDllAnsi;
 
         // Re-entrancy guard. While a hook is doing its work it inevitably calls
@@ -50,6 +57,7 @@ namespace fluxora::vfs
         // Per-handle directory enumeration state for virtualized directories.
         struct DirEnumState
         {
+            std::size_t mountIndex = 0;
             std::wstring relLower;
             bool built = false;
             bool patternInitialized = false;
@@ -141,9 +149,15 @@ namespace fluxora::vfs
             return dosPath.size() >= 2 && dosPath[1] == L':';
         }
 
-        // True when `dosPath` is the data directory or lives inside it; `rel` is
-        // filled with the remainder ("" for the data directory itself).
-        bool underTarget(const std::wstring& dosPath, std::wstring& rel)
+        struct TargetMatch
+        {
+            std::size_t mountIndex = 0;
+            std::wstring rel;
+        };
+
+        // True when `dosPath` is a mount target or lives inside it; `match.rel` is
+        // filled with the remainder ("" for the target directory itself).
+        bool underMountedTarget(const std::wstring& dosPath, TargetMatch& match)
         {
             std::wstring lower = VfsTree::toLower(dosPath);
             while (!lower.empty() && (lower.back() == L'\\' || lower.back() == L'/'))
@@ -151,18 +165,24 @@ namespace fluxora::vfs
                 lower.pop_back();
             }
 
-            if (lower == g_targetLower)
+            for (std::size_t index = 0; index < g_mounts.size(); ++index)
             {
-                rel.clear();
-                return true;
-            }
+                const std::wstring& targetLower = g_mounts[index].targetLower;
+                if (lower == targetLower)
+                {
+                    match.mountIndex = index;
+                    match.rel.clear();
+                    return true;
+                }
 
-            if (lower.size() > g_targetLower.size() + 1 &&
-                lower.compare(0, g_targetLower.size(), g_targetLower) == 0 &&
-                lower[g_targetLower.size()] == L'\\')
-            {
-                rel = dosPath.substr(g_targetLower.size() + 1);
-                return true;
+                if (lower.size() > targetLower.size() + 1 &&
+                    lower.compare(0, targetLower.size(), targetLower) == 0 &&
+                    lower[targetLower.size()] == L'\\')
+                {
+                    match.mountIndex = index;
+                    match.rel = dosPath.substr(targetLower.size() + 1);
+                    return true;
+                }
             }
 
             return false;
@@ -210,12 +230,13 @@ namespace fluxora::vfs
         // Copy-on-write into the writable overwrite overlay. Returns the path the
         // write should be redirected to, leaving every mod folder untouched.
         std::wstring writeRedirect(
+            const RuntimeMount& mount,
             const std::wstring& rel,
             bool fileKnown,
             const std::wstring& winner,
             ULONG disposition)
         {
-            const std::wstring candidate = joinPath(g_overwrite, rel);
+            const std::wstring candidate = joinPath(mount.overwrite, rel);
             if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
             {
                 return candidate;
@@ -235,16 +256,23 @@ namespace fluxora::vfs
             bool redirect = false;
             std::wstring path;
             bool registerMerge = false;
+            std::size_t mountIndex = 0;
             std::wstring relLower;
         };
 
-        OpenDecision decideOpen(const std::wstring& rel, ULONG disposition, bool writeAccess)
+        OpenDecision decideOpen(
+            std::size_t mountIndex,
+            const std::wstring& rel,
+            ULONG disposition,
+            bool writeAccess)
         {
+            const RuntimeMount& mount = g_mounts[mountIndex];
             const std::wstring relN = VfsTree::normalizeRel(rel);
             const std::wstring relLower = VfsTree::toLower(relN);
-            const VfsTree::PathInfo info = g_tree.classify(relN);
+            const VfsTree::PathInfo info = mount.tree.classify(relN);
 
             OpenDecision decision;
+            decision.mountIndex = mountIndex;
             switch (info.kind)
             {
             case VfsTree::PathInfo::Kind::Directory:
@@ -261,9 +289,9 @@ namespace fluxora::vfs
                 if (writeAccess)
                 {
                     decision.redirect = true;
-                    decision.path = writeRedirect(relN, true, info.winner, disposition);
+                    decision.path = writeRedirect(mount, relN, true, info.winner, disposition);
                 }
-                else if (!VfsTree::equalsIgnoreCase(info.winner, joinPath(g_tree.target(), relN)))
+                else if (!VfsTree::equalsIgnoreCase(info.winner, joinPath(mount.tree.target(), relN)))
                 {
                     decision.redirect = true;
                     decision.path = info.winner;
@@ -272,9 +300,9 @@ namespace fluxora::vfs
 
             case VfsTree::PathInfo::Kind::Unknown:
             default:
-                if (!g_overwrite.empty() && info.parentVirtual)
+                if (!mount.overwrite.empty() && info.parentVirtual)
                 {
-                    const std::wstring candidate = joinPath(g_overwrite, relN);
+                    const std::wstring candidate = joinPath(mount.overwrite, relN);
                     const DWORD attributes = GetFileAttributesW(candidate.c_str());
                     if (attributes != INVALID_FILE_ATTRIBUTES)
                     {
@@ -286,7 +314,7 @@ namespace fluxora::vfs
                     if (dispositionCreates(disposition) || writeAccess)
                     {
                         decision.redirect = true;
-                        decision.path = writeRedirect(relN, false, std::wstring(), disposition);
+                        decision.path = writeRedirect(mount, relN, false, std::wstring(), disposition);
                     }
                 }
                 return decision;
@@ -333,15 +361,19 @@ namespace fluxora::vfs
             HANDLE savedRoot_{};
         };
 
-        void registerDirectoryHandle(HANDLE handle, const std::wstring& relLower)
+        void registerDirectoryHandle(HANDLE handle, std::size_t mountIndex, const std::wstring& relLower)
         {
-            if (handle == nullptr || handle == INVALID_HANDLE_VALUE || !g_tree.isVirtualDir(relLower))
+            if (handle == nullptr ||
+                handle == INVALID_HANDLE_VALUE ||
+                mountIndex >= g_mounts.size() ||
+                !g_mounts[mountIndex].tree.isVirtualDir(relLower))
             {
                 return;
             }
 
             std::scoped_lock lock(g_dirMutex);
             DirEnumState state;
+            state.mountIndex = mountIndex;
             state.relLower = relLower;
             g_dirStates[handle] = std::move(state);
         }
@@ -350,6 +382,14 @@ namespace fluxora::vfs
         {
             std::scoped_lock lock(g_dirMutex);
             g_dirStates.erase(handle);
+        }
+
+        void clearRuntimeState()
+        {
+            std::scoped_lock lock(g_dirMutex);
+            g_dirStates.clear();
+            g_mounts.clear();
+            g_hookDllAnsi.clear();
         }
 
         // --- directory enumeration synthesis -------------------------------
@@ -403,7 +443,13 @@ namespace fluxora::vfs
         void buildEnumEntries(DirEnumState& state)
         {
             state.entries.clear();
-            const std::vector<DirChild>* listing = g_tree.listing(state.relLower);
+            if (state.mountIndex >= g_mounts.size())
+            {
+                return;
+            }
+
+            const std::vector<DirChild>* listing =
+                g_mounts[state.mountIndex].tree.listing(state.relLower);
 
             const auto matches = [&state](const std::wstring& nameLower)
             {
@@ -628,7 +674,7 @@ namespace fluxora::vfs
             PVOID EaBuffer,
             ULONG EaLength)
         {
-            if (reentrant() || !g_tree.isBuilt())
+            if (reentrant() || g_mounts.empty())
             {
                 return Real_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
                     AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions,
@@ -638,13 +684,13 @@ namespace fluxora::vfs
             Guard guard;
 
             std::wstring dosPath;
-            std::wstring rel;
+            TargetMatch match;
             OpenDecision decision;
             bool handled = false;
-            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underTarget(dosPath, rel))
+            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
                 const bool writeAccess = desiredAccessWrites(DesiredAccess) || dispositionCreates(CreateDisposition);
-                decision = decideOpen(rel, CreateDisposition, writeAccess);
+                decision = decideOpen(match.mountIndex, match.rel, CreateDisposition, writeAccess);
                 handled = true;
             }
 
@@ -665,7 +711,7 @@ namespace fluxora::vfs
 
             if (handled && decision.registerMerge && status == StatusSuccess && FileHandle != nullptr)
             {
-                registerDirectoryHandle(*FileHandle, decision.relLower);
+                registerDirectoryHandle(*FileHandle, decision.mountIndex, decision.relLower);
             }
 
             return status;
@@ -679,7 +725,7 @@ namespace fluxora::vfs
             ULONG ShareAccess,
             ULONG OpenOptions)
         {
-            if (reentrant() || !g_tree.isBuilt())
+            if (reentrant() || g_mounts.empty())
             {
                 return Real_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
                     ShareAccess, OpenOptions);
@@ -688,13 +734,13 @@ namespace fluxora::vfs
             Guard guard;
 
             std::wstring dosPath;
-            std::wstring rel;
+            TargetMatch match;
             OpenDecision decision;
             bool handled = false;
-            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underTarget(dosPath, rel))
+            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
                 const bool writeAccess = desiredAccessWrites(DesiredAccess);
-                decision = decideOpen(rel, /*disposition=*/1 /*FILE_OPEN*/, writeAccess);
+                decision = decideOpen(match.mountIndex, match.rel, /*disposition=*/1 /*FILE_OPEN*/, writeAccess);
                 handled = true;
             }
 
@@ -713,7 +759,7 @@ namespace fluxora::vfs
 
             if (handled && decision.registerMerge && status == StatusSuccess && FileHandle != nullptr)
             {
-                registerDirectoryHandle(*FileHandle, decision.relLower);
+                registerDirectoryHandle(*FileHandle, decision.mountIndex, decision.relLower);
             }
 
             return status;
@@ -723,7 +769,7 @@ namespace fluxora::vfs
             POBJECT_ATTRIBUTES ObjectAttributes,
             FileBasicInformationData* FileInformation)
         {
-            if (reentrant() || !g_tree.isBuilt())
+            if (reentrant() || g_mounts.empty())
             {
                 return Real_NtQueryAttributesFile(ObjectAttributes, FileInformation);
             }
@@ -731,10 +777,11 @@ namespace fluxora::vfs
             Guard guard;
 
             std::wstring dosPath;
-            std::wstring rel;
-            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underTarget(dosPath, rel))
+            TargetMatch match;
+            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
-                const OpenDecision decision = decideOpen(rel, /*disposition=*/1, /*writeAccess=*/false);
+                const OpenDecision decision =
+                    decideOpen(match.mountIndex, match.rel, /*disposition=*/1, /*writeAccess=*/false);
                 if (decision.redirect)
                 {
                     RedirectScope redirect(ObjectAttributes, decision.path);
@@ -749,7 +796,7 @@ namespace fluxora::vfs
             POBJECT_ATTRIBUTES ObjectAttributes,
             FileNetworkOpenInformationData* FileInformation)
         {
-            if (reentrant() || !g_tree.isBuilt())
+            if (reentrant() || g_mounts.empty())
             {
                 return Real_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
             }
@@ -757,10 +804,11 @@ namespace fluxora::vfs
             Guard guard;
 
             std::wstring dosPath;
-            std::wstring rel;
-            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underTarget(dosPath, rel))
+            TargetMatch match;
+            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
-                const OpenDecision decision = decideOpen(rel, /*disposition=*/1, /*writeAccess=*/false);
+                const OpenDecision decision =
+                    decideOpen(match.mountIndex, match.rel, /*disposition=*/1, /*writeAccess=*/false);
                 if (decision.redirect)
                 {
                     RedirectScope redirect(ObjectAttributes, decision.path);
@@ -845,7 +893,7 @@ namespace fluxora::vfs
             PUNICODE_STRING FileName,
             BOOLEAN RestartScan)
         {
-            if (reentrant() || !g_tree.isBuilt())
+            if (reentrant() || g_mounts.empty())
             {
                 return Real_NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
                     FileInformation, Length, FileInformationClass, ReturnSingleEntry, FileName, RestartScan);
@@ -878,7 +926,7 @@ namespace fluxora::vfs
             ULONG QueryFlags,
             PUNICODE_STRING FileName)
         {
-            if (reentrant() || !g_tree.isBuilt())
+            if (reentrant() || g_mounts.empty())
             {
                 return Real_NtQueryDirectoryFileEx(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
                     FileInformation, Length, FileInformationClass, QueryFlags, FileName);
@@ -1011,19 +1059,41 @@ namespace fluxora::vfs
 
     bool installHooks(const VfsConfig& config)
     {
-        if (config.mods.empty() && config.overwrite.empty())
+        g_mounts.clear();
+        for (const VfsMountConfig& mountConfig : config.mounts)
+        {
+            if (!mountConfig.isValid() ||
+                (mountConfig.mods.empty() && mountConfig.overwrite.empty()))
+            {
+                continue;
+            }
+
+            RuntimeMount mount;
+            mount.tree.build(mountConfig);
+            mount.targetLower = VfsTree::toLower(mount.tree.target());
+            mount.overwrite = mount.tree.overwrite();
+            g_mounts.push_back(std::move(mount));
+        }
+
+        std::sort(
+            g_mounts.begin(),
+            g_mounts.end(),
+            [](const RuntimeMount& left, const RuntimeMount& right)
+            {
+                return left.targetLower.size() > right.targetLower.size();
+            });
+
+        if (g_mounts.empty())
         {
             return false; // nothing to virtualize
         }
 
-        g_tree.build(config);
-        g_targetLower = VfsTree::toLower(g_tree.target());
-        g_overwrite = g_tree.overwrite();
         g_hookDllAnsi = toAnsi(config.hookDll);
 
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr)
         {
+            clearRuntimeState();
             return false;
         }
 
@@ -1041,6 +1111,7 @@ namespace fluxora::vfs
 
         if (DetourTransactionBegin() != NO_ERROR)
         {
+            clearRuntimeState();
             return false;
         }
         DetourUpdateThread(GetCurrentThread());
@@ -1059,6 +1130,7 @@ namespace fluxora::vfs
         if (result != NO_ERROR)
         {
             VfsLog::writef(L"DetourTransactionCommit failed: %ld", result);
+            clearRuntimeState();
             return false;
         }
 
@@ -1086,7 +1158,6 @@ namespace fluxora::vfs
 
         DetourTransactionCommit();
 
-        std::scoped_lock lock(g_dirMutex);
-        g_dirStates.clear();
+        clearRuntimeState();
     }
 }

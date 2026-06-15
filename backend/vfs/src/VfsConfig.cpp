@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <utility>
 
 namespace fluxora::vfs
 {
@@ -64,10 +65,47 @@ namespace fluxora::vfs
             const JsonValue* value = object.find(field);
             return (value != nullptr && value->isString()) ? value->asString() : std::wstring{};
         }
+
+        std::vector<std::wstring> readStringArray(const JsonValue& object, const wchar_t* field)
+        {
+            std::vector<std::wstring> values;
+            const JsonValue* array = object.find(field);
+            if (array == nullptr || !array->isArray())
+            {
+                return values;
+            }
+
+            for (const JsonValue& item : array->asArray())
+            {
+                if (item.isString() && !item.asString().empty())
+                {
+                    values.push_back(item.asString());
+                }
+            }
+
+            return values;
+        }
+
+        VfsMountConfig readMount(const JsonValue& value)
+        {
+            VfsMountConfig mount;
+            if (!value.isObject())
+            {
+                return mount;
+            }
+
+            mount.target = readString(value, protocol::fields::target);
+            mount.overwrite = readString(value, protocol::fields::overwrite);
+            mount.mods = readStringArray(value, protocol::fields::mods);
+            mount.excludedRootNames = readStringArray(value, protocol::fields::excludedRootNames);
+            return mount;
+        }
     }
 
     bool loadVfsConfigFromEnvironment(VfsConfig& config)
     {
+        config = VfsConfig{};
+
         const std::wstring path = readEnvironment(protocol::configEnvironmentVariable);
         if (path.empty())
         {
@@ -98,17 +136,29 @@ namespace fluxora::vfs
             config.overwrite = readString(root, protocol::fields::overwrite);
             config.logPath = readString(root, protocol::fields::logPath);
             config.hookDll = readString(root, protocol::fields::hookDll);
+            config.mods = readStringArray(root, protocol::fields::mods);
 
-            if (const JsonValue* mods = root.find(protocol::fields::mods);
-                mods != nullptr && mods->isArray())
+            if (const JsonValue* mounts = root.find(protocol::fields::mounts);
+                mounts != nullptr && mounts->isArray())
             {
-                for (const JsonValue& mod : mods->asArray())
+                for (const JsonValue& item : mounts->asArray())
                 {
-                    if (mod.isString() && !mod.asString().empty())
+                    VfsMountConfig mount = readMount(item);
+                    if (mount.isValid())
                     {
-                        config.mods.push_back(mod.asString());
+                        config.mounts.push_back(std::move(mount));
                     }
                 }
+            }
+
+            if (config.mounts.empty() && !config.target.empty())
+            {
+                config.mounts.push_back(VfsMountConfig{
+                    config.target,
+                    config.overwrite,
+                    config.mods,
+                    {}
+                });
             }
         }
         catch (...)

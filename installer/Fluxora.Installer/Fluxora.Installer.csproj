@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>FluxoraSetup</AssemblyName>
+    <RootNamespace>Fluxora.Installer</RootNamespace>
+    <ApplicationIcon>..\..\Icons\Fluxora.ico</ApplicationIcon>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishSelfContained>true</PublishSelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <SatelliteResourceLanguages>en;ru;de</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpVectors.Wpf" Version="1.8.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\Icons\Fluxora.ico" Link="Fluxora.ico" />
+    <Resource Include="..\..\Icons\Fluxora.png" Link="Fluxora.png" />
+    <Resource Include="Assets\Emoji\*.svg" />
+    <Page Include="..\..\frontend\Assets\Icons.xaml" Link="Assets\Icons.xaml" />
+    <Resource Include="..\..\frontend\Fonts\*.ttf" LinkBase="Fonts" />
+    <Compile Include="..\..\frontend\Controls\LineIcon.cs" Link="Controls\LineIcon.cs" />
+    <Compile Include="..\..\frontend\Services\WindowChromeService.cs" Link="Services\WindowChromeService.cs" />
+    <EmbeddedResource Include="Resources\Legal\**\*.txt" />
+    <EmbeddedResource Include="Resources\Payload\FluxoraPayload.flxpkg"
+                      Condition="Exists('Resources\Payload\FluxoraPayload.flxpkg')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\build\backend\$(Configuration)\FluxoraInstallerCore.dll"
+          Link="FluxoraInstallerCore.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Condition="Exists('..\..\build\backend\$(Configuration)\FluxoraInstallerCore.dll')" />
+    <NativeLibrary Include="..\..\build\backend\$(Configuration)\FluxoraInstallerCore.dll"
+                   Link="FluxoraInstallerCore.dll"
+                   CopyToOutputDirectory="PreserveNewest"
+                   CopyToPublishDirectory="PreserveNewest"
+                   Condition="Exists('..\..\build\backend\$(Configuration)\FluxoraInstallerCore.dll')" />
+  </ItemGroup>
+</Project>

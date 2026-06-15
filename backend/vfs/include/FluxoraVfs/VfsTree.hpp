@@ -25,7 +25,7 @@ namespace fluxora::vfs
         LARGE_INTEGER allocationSize{};
     };
 
-    // The merged, read-mostly view of the game data directory.
+    // The merged, read-mostly view of one virtualized game directory.
     //
     // It is assembled once when the DLL is injected: every enabled mod (in load
     // order) plus the writable overwrite overlay are walked and merged on top of
@@ -36,7 +36,7 @@ namespace fluxora::vfs
     class VfsTree final
     {
     public:
-        // What a path under the data directory maps to in the merged tree.
+        // What a path under the mount target maps to in the merged tree.
         struct PathInfo
         {
             enum class Kind
@@ -52,13 +52,13 @@ namespace fluxora::vfs
             bool parentVirtual{false}; // Unknown: its parent directory is virtualized
         };
 
-        void build(const VfsConfig& config);
+        void build(const VfsMountConfig& config);
 
         [[nodiscard]] const std::wstring& target() const noexcept { return target_; }
         [[nodiscard]] const std::wstring& overwrite() const noexcept { return overwrite_; }
         [[nodiscard]] bool isBuilt() const noexcept { return built_; }
 
-        // Pure lookup: classify a path (relative to the data directory, backslashes,
+        // Pure lookup: classify a path (relative to the mount target, backslashes,
         // "" = the data directory itself). The hooks turn this into a concrete
         // open/redirect decision and perform any disk side effects themselves.
         [[nodiscard]] PathInfo classify(const std::wstring& rel) const;
@@ -87,10 +87,12 @@ namespace fluxora::vfs
         void mergeRealDirectory(const std::wstring& relLower, const std::wstring& realDir);
         DirNode& ensureDir(const std::wstring& relLower);
         void upsertChild(const std::wstring& parentLower, DirChild child, bool overrideExisting);
+        [[nodiscard]] bool isExcludedTopLevelName(const std::wstring& name) const;
         void finalize();
 
         std::wstring target_;
         std::wstring overwrite_;
+        std::vector<std::wstring> excludedRootNames_;
 
         // rel(lower) -> winning backing file path. Files only.
         std::unordered_map<std::wstring, std::wstring> fileMap_;

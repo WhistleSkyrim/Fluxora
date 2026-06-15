@@ -62,6 +62,30 @@ if(WIN32)
 endif()
 
 # --------------------------------------------------------------------------
+# FluxoraInstallerCore: native installer logic used by the WPF setup UI.
+# --------------------------------------------------------------------------
+if(WIN32)
+    add_library(FluxoraInstallerCore SHARED
+        src/Installer/FluxoraInstallerApi.cpp
+    )
+
+    target_include_directories(FluxoraInstallerCore
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_compile_features(FluxoraInstallerCore PUBLIC cxx_std_20)
+    target_compile_definitions(FluxoraInstallerCore PRIVATE FLUXORA_INSTALLER_EXPORTS)
+    target_link_libraries(FluxoraInstallerCore PRIVATE ole32 shell32)
+
+    if(MSVC)
+        target_compile_options(FluxoraInstallerCore PRIVATE /W4 /permissive- /utf-8)
+    else()
+        target_compile_options(FluxoraInstallerCore PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
+# --------------------------------------------------------------------------
 # Virtual file system: Microsoft Detours + the injected FluxoraVfs.dll hook.
 # --------------------------------------------------------------------------
 if(FLUXORA_ENABLE_VFS AND WIN32)

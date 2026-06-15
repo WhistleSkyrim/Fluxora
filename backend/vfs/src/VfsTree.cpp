@@ -117,6 +117,13 @@ namespace fluxora::vfs
         }
     }
 
+    bool VfsTree::isExcludedTopLevelName(const std::wstring& name) const
+    {
+        const std::wstring nameLower = toLower(name);
+        return std::find(excludedRootNames_.begin(), excludedRootNames_.end(), nameLower) !=
+            excludedRootNames_.end();
+    }
+
     void VfsTree::walkOverlay(const std::wstring& physicalDir, const std::wstring& rel)
     {
         const std::wstring relLower = toLower(rel);
@@ -135,6 +142,11 @@ namespace fluxora::vfs
         {
             const std::wstring name = data.cFileName;
             if (name == L"." || name == L"..")
+            {
+                continue;
+            }
+
+            if (rel.empty() && isExcludedTopLevelName(name))
             {
                 continue;
             }
@@ -224,12 +236,22 @@ namespace fluxora::vfs
         g_dirRel.clear();
     }
 
-    void VfsTree::build(const VfsConfig& config)
+    void VfsTree::build(const VfsMountConfig& config)
     {
         target_ = stripTrailingSlashes(config.target);
         overwrite_ = stripTrailingSlashes(config.overwrite);
+        excludedRootNames_.clear();
+        excludedRootNames_.reserve(config.excludedRootNames.size());
+        for (const std::wstring& name : config.excludedRootNames)
+        {
+            const std::wstring normalized = normalizeRel(name);
+            if (!normalized.empty() && normalized.find(L'\\') == std::wstring::npos)
+            {
+                excludedRootNames_.push_back(toLower(normalized));
+            }
+        }
 
-        // Always have a root node so the data directory itself is virtualized.
+        // Always have a root node so the mount target itself is virtualized.
         ensureDir(L"");
         g_dirRel[L""] = L"";
 

@@ -39,6 +39,7 @@ namespace fluxora
         std::filesystem::path resolvedWorkingDirectory;
         std::wstring commandLine;
         std::filesystem::path gamePath;
+        std::filesystem::path rootBuilderLaunchCacheDirectory;
         std::filesystem::path projectDirectory;
         std::wstring templateId;
         std::wstring dataDirectory;

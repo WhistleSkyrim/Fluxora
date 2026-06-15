@@ -9,7 +9,7 @@ namespace Fluxora.App.Services;
 
 public sealed class ExecutableIconSourceConverter : IValueConverter
 {
-    private const string PlaceholderUri = "pack://application:,,,/Assets/Images/app-icon-placeholder.png";
+    private const string PlaceholderUri = "pack://application:,,,/Fluxora.png";
     private static readonly object CacheGate = new();
     private static readonly Dictionary<string, ImageSource> Cache = new(StringComparer.OrdinalIgnoreCase);
 

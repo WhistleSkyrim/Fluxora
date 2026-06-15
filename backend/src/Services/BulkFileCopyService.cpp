@@ -9,6 +9,7 @@
 #include <deque>
 #include <exception>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -38,7 +39,9 @@ namespace fluxora
         {
             std::atomic<std::uintmax_t> copiedBytes{0};
             std::mutex mutex;
+            std::mutex callbackMutex;
             std::chrono::steady_clock::time_point lastReport{};
+            std::uintmax_t lastReportedBytes{0};
             int lastPercent{-1};
         };
 
@@ -218,6 +221,24 @@ namespace fluxora
             }
 
             return stream.str();
+        }
+
+        void preallocateDestinationFile(HANDLE fileHandle, std::uintmax_t bytes) noexcept
+        {
+            if (fileHandle == INVALID_HANDLE_VALUE || bytes == 0)
+            {
+                return;
+            }
+
+            FILE_ALLOCATION_INFO allocation{};
+            const std::uintmax_t cappedBytes =
+                (std::min)(bytes, static_cast<std::uintmax_t>((std::numeric_limits<LONGLONG>::max)()));
+            allocation.AllocationSize.QuadPart = static_cast<LONGLONG>(cappedBytes);
+            SetFileInformationByHandle(
+                fileHandle,
+                FileAllocationInfo,
+                &allocation,
+                static_cast<DWORD>(sizeof(allocation)));
         }
 
         std::wstring pathForWin32Io(const std::filesystem::path& path)
@@ -567,23 +588,83 @@ namespace fluxora
                 ? 100
                 : static_cast<int>(((std::min)(copiedBytes, totalBytes) * 100) / totalBytes);
             const auto now = std::chrono::steady_clock::now();
+            constexpr std::uintmax_t minByteInterval = 32ull * 1024ull * 1024ull;
 
-            std::lock_guard lock(state.mutex);
-            if (!force &&
-                state.lastPercent == copyPercent &&
-                now - state.lastReport < std::chrono::milliseconds(150))
+            BulkFileCopyProgress update;
+            std::unique_lock<std::mutex> callbackLock;
             {
-                return;
+                std::lock_guard lock(state.mutex);
+                if (!force &&
+                    copiedBytes - state.lastReportedBytes < minByteInterval &&
+                    now - state.lastReport < std::chrono::milliseconds(150))
+                {
+                    return;
+                }
+
+                state.lastPercent = copyPercent;
+                state.lastReportedBytes = copiedBytes;
+                state.lastReport = now;
+                callbackLock = std::unique_lock<std::mutex>(state.callbackMutex);
+                update = BulkFileCopyProgress{
+                    std::wstring(currentStep),
+                    currentItem,
+                    copiedBytes,
+                    totalBytes
+                };
             }
 
-            state.lastPercent = copyPercent;
-            state.lastReport = now;
-            progress(BulkFileCopyProgress{
-                std::wstring(currentStep),
-                currentItem,
-                copiedBytes,
-                totalBytes
-            });
+            progress(update);
+        }
+
+        std::size_t bufferSizeForTask(const CopyFileTask& task)
+        {
+            constexpr std::size_t smallBuffer = 1ull * 1024ull * 1024ull;
+            constexpr std::size_t largeBuffer = 16ull * 1024ull * 1024ull;
+            constexpr std::uintmax_t largeFile = 64ull * 1024ull * 1024ull;
+
+            return task.bytes >= largeFile ? largeBuffer : smallBuffer;
+        }
+
+        std::size_t defaultCopyWorkerLimit(std::uintmax_t totalBytes, unsigned int hardwareThreads)
+        {
+            const std::size_t detectedWorkers = hardwareThreads == 0 ? 4 : hardwareThreads;
+            constexpr std::uintmax_t largeTransfer = 1024ull * 1024ull * 1024ull;
+            const std::size_t cap = totalBytes >= largeTransfer ? 2 : 4;
+            return (std::max<std::size_t>)(1, (std::min)(detectedWorkers, cap));
+        }
+
+        bool isLargeTransfer(const BulkFileCopyOptions& options)
+        {
+            constexpr std::uintmax_t largeTransfer = 1024ull * 1024ull * 1024ull;
+            return options.totalBytes >= largeTransfer;
+        }
+
+        std::size_t queuedTaskLimit(std::size_t workerCount, const BulkFileCopyOptions& options)
+        {
+            const std::size_t multiplier = isLargeTransfer(options) ? 32 : 64;
+            return (std::max<std::size_t>)(128, workerCount * multiplier);
+        }
+
+        void rememberCopyException(
+            std::exception_ptr& firstError,
+            std::mutex& errorMutex,
+            std::atomic<bool>& shouldStop,
+            CopyTaskQueue& queue)
+        {
+            {
+                std::lock_guard lock(errorMutex);
+                if (!firstError)
+                {
+                    firstError = std::current_exception();
+                }
+            }
+            shouldStop.store(true, std::memory_order_relaxed);
+
+            {
+                std::lock_guard lock(queue.mutex);
+                queue.closed = true;
+            }
+            queue.changed.notify_all();
         }
 
         void addCopiedBytes(
@@ -671,7 +752,9 @@ namespace fluxora
                 std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
             }
 
-            std::vector<char> buffer(4 * 1024 * 1024);
+            preallocateDestinationFile(output.get(), task.bytes);
+
+            std::vector<char> buffer(bufferSizeForTask(task));
             for (;;)
             {
                 DWORD bytesRead = 0;
@@ -814,7 +897,7 @@ namespace fluxora
                 std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
             }
 
-            std::vector<char> buffer(4 * 1024 * 1024);
+            std::vector<char> buffer(bufferSizeForTask(task));
             while (input)
             {
                 input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
@@ -1046,25 +1129,16 @@ namespace fluxora
         std::mutex errorMutex;
 
         const unsigned int hardwareThreads = std::thread::hardware_concurrency();
-        const std::size_t detectedWorkers = hardwareThreads == 0 ? 4 : hardwareThreads;
         const std::size_t workerLimit = options.maxWorkers == 0
-            ? (std::min<std::size_t>)(detectedWorkers, 8)
+            ? defaultCopyWorkerLimit(options.totalBytes, hardwareThreads)
             : options.maxWorkers;
         const std::size_t workerCount = (std::max<std::size_t>)(1, workerLimit);
         CopyTaskQueue queue;
-        queue.maxQueuedTasks = (std::max<std::size_t>)(64, workerCount * 16);
+        queue.maxQueuedTasks = queuedTaskLimit(workerCount, options);
 
         const auto rememberCurrentException = [&]()
         {
-            {
-                std::lock_guard lock(errorMutex);
-                if (!firstError)
-                {
-                    firstError = std::current_exception();
-                }
-            }
-            shouldStop.store(true, std::memory_order_relaxed);
-            closeCopyQueue(queue);
+            rememberCopyException(firstError, errorMutex, shouldStop, queue);
         };
 
         logger_.write(

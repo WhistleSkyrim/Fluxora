@@ -6,6 +6,8 @@
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
 #include <fstream>
+#include <algorithm>
+#include <cwctype>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -53,7 +55,81 @@ namespace fluxora
                 CP_ACP, 0, value.data(), static_cast<int>(value.size()), out.data(), size, nullptr, nullptr);
             return out;
         }
+
+        std::string win32Message(DWORD value)
+        {
+            if (value == ERROR_SUCCESS)
+            {
+                return {};
+            }
+
+            LPWSTR raw = nullptr;
+            const DWORD length = FormatMessageW(
+                FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                    FORMAT_MESSAGE_FROM_SYSTEM |
+                    FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr,
+                value,
+                0,
+                reinterpret_cast<LPWSTR>(&raw),
+                0,
+                nullptr);
+            if (length == 0 || raw == nullptr)
+            {
+                return {};
+            }
+
+            std::wstring message(raw, raw + length);
+            LocalFree(raw);
+            while (!message.empty() &&
+                (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' '))
+            {
+                message.pop_back();
+            }
+
+            return toUtf8(message);
+        }
+
+        std::string describeWin32Error(DWORD value)
+        {
+            std::string description = std::to_string(value);
+            if (const std::string message = win32Message(value); !message.empty())
+            {
+                description += " (" + message + ")";
+            }
+
+            return description;
+        }
 #endif
+
+        struct VfsMountDescriptor
+        {
+            std::filesystem::path target;
+            std::filesystem::path overwrite;
+            std::vector<std::filesystem::path> mods;
+            std::vector<std::wstring> excludedRootNames;
+        };
+
+        std::wstring toLower(std::wstring value)
+        {
+            std::transform(
+                value.begin(),
+                value.end(),
+                value.begin(),
+                [](wchar_t character) { return static_cast<wchar_t>(std::towlower(character)); });
+            return value;
+        }
+
+        bool supportsRootBuilder(std::wstring_view templateId)
+        {
+            return toLower(std::wstring(templateId)).find(L"skyrim") != std::wstring::npos;
+        }
+
+        bool isDirectory(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_directory(path, error);
+        }
 
         void writeTextFile(const std::filesystem::path& path, const std::string& content)
         {
@@ -118,25 +194,93 @@ namespace fluxora
             return mods;
         }
 
+        std::vector<std::filesystem::path> collectRootBuilderMods(
+            const std::vector<std::filesystem::path>& mods)
+        {
+            std::vector<std::filesystem::path> rootMods;
+            rootMods.reserve(mods.size());
+            for (const std::filesystem::path& mod : mods)
+            {
+                const std::filesystem::path root = mod / L"root";
+                if (isDirectory(root))
+                {
+                    rootMods.push_back(root);
+                }
+            }
+
+            return rootMods;
+        }
+
+        std::vector<std::filesystem::path> collectDataMountMods(
+            const std::vector<std::filesystem::path>& mods,
+            const std::wstring& dataDirectory,
+            bool rootBuilderEnabled)
+        {
+            std::vector<std::filesystem::path> dataMods;
+            dataMods.reserve(rootBuilderEnabled ? mods.size() * 2 : mods.size());
+            for (const std::filesystem::path& mod : mods)
+            {
+                dataMods.push_back(mod);
+                if (!rootBuilderEnabled)
+                {
+                    continue;
+                }
+
+                const std::filesystem::path rootData = mod / L"root" / dataDirectory;
+                if (isDirectory(rootData))
+                {
+                    dataMods.push_back(rootData);
+                }
+            }
+
+            return dataMods;
+        }
+
 #ifdef FLUXORA_ENABLE_VFS
+        void writePathArray(JsonWriter& writer, const std::vector<std::filesystem::path>& paths)
+        {
+            writer.beginArray();
+            for (const std::filesystem::path& path : paths)
+            {
+                writer.value(path.wstring());
+            }
+            writer.endArray();
+        }
+
+        void writeMount(JsonWriter& writer, const VfsMountDescriptor& mount)
+        {
+            writer.beginObject();
+            writer.field(vfs::protocol::fields::target, mount.target.wstring());
+            writer.field(vfs::protocol::fields::overwrite, mount.overwrite.wstring());
+            writer.key(vfs::protocol::fields::mods);
+            writePathArray(writer, mount.mods);
+            writer.stringArray(vfs::protocol::fields::excludedRootNames, mount.excludedRootNames);
+            writer.endObject();
+        }
+
         std::wstring buildDescriptor(
-            const std::filesystem::path& target,
-            const std::filesystem::path& overwrite,
             const std::filesystem::path& logPath,
             const std::filesystem::path& hookDll,
-            const std::vector<std::filesystem::path>& mods)
+            const std::vector<VfsMountDescriptor>& mounts)
         {
             JsonWriter writer;
             writer.beginObject();
             writer.field(vfs::protocol::fields::schemaVersion, vfs::protocol::schemaVersion);
-            writer.field(vfs::protocol::fields::target, target.wstring());
-            writer.field(vfs::protocol::fields::overwrite, overwrite.wstring());
             writer.field(vfs::protocol::fields::logPath, logPath.wstring());
             writer.field(vfs::protocol::fields::hookDll, hookDll.wstring());
-            writer.key(vfs::protocol::fields::mods).beginArray();
-            for (const std::filesystem::path& mod : mods)
+
+            if (!mounts.empty())
             {
-                writer.value(mod.wstring());
+                writer.field(vfs::protocol::fields::target, mounts.front().target.wstring());
+                writer.field(vfs::protocol::fields::overwrite, mounts.front().overwrite.wstring());
+                writer.key(vfs::protocol::fields::mods);
+                writePathArray(writer, mounts.front().mods);
+            }
+
+            writer.key(vfs::protocol::fields::mounts).beginArray();
+            for (const VfsMountDescriptor& mount : mounts)
+            {
+                writeMount(writer, mount);
             }
             writer.endArray();
             writer.endObject();
@@ -189,9 +333,9 @@ namespace fluxora
         // Built without the virtual file system: behave exactly like a plain run.
         return executables_.launchProjectExecutable(configPath, executableId);
 #else
-        const auto fallbackPlainLaunch = [&](const char* reason) -> GameExecutableLaunchResult
+        const auto fallbackPlainLaunch = [&](const std::string& reason) -> GameExecutableLaunchResult
         {
-            logger_.write(LogLevel::Warning, std::string("Launching without the virtual file system: ") + reason);
+            logger_.write(LogLevel::Warning, "Launching without the virtual file system: " + reason);
             return executables_.launchProjectExecutable(configPath, executableId);
         };
 
@@ -201,7 +345,7 @@ namespace fluxora
         }
 
         const std::wstring dataDirectory = resolved.dataDirectory.empty() ? L"Data" : resolved.dataDirectory;
-        const std::filesystem::path target = resolved.gamePath / dataDirectory;
+        const std::filesystem::path dataTarget = resolved.gamePath / dataDirectory;
 
         std::wstring profile = resolved.defaultProfile.empty() ? L"Default" : resolved.defaultProfile;
         const std::vector<std::filesystem::path> mods =
@@ -218,17 +362,91 @@ namespace fluxora
         }
 
         const std::filesystem::path overwrite = pathSettings_.overwriteDirectory(resolved.projectDirectory);
+        const bool rootBuilderEnabled = supportsRootBuilder(resolved.templateId);
+        const std::vector<std::filesystem::path> dataMods =
+            collectDataMountMods(mods, dataDirectory, rootBuilderEnabled);
+        std::vector<VfsMountDescriptor> mounts;
+        mounts.push_back(VfsMountDescriptor{
+            dataTarget,
+            overwrite,
+            dataMods,
+            rootBuilderEnabled ? std::vector<std::wstring>{L"root"} : std::vector<std::wstring>{}
+        });
+
+        const std::vector<std::filesystem::path> rootMods = rootBuilderEnabled
+            ? collectRootBuilderMods(mods)
+            : std::vector<std::filesystem::path>{};
+        const std::filesystem::path rootOverwrite = overwrite / L"root";
+        if (rootBuilderEnabled && (!rootMods.empty() || isDirectory(rootOverwrite)))
+        {
+            mounts.push_back(VfsMountDescriptor{
+                resolved.gamePath,
+                rootOverwrite,
+                rootMods,
+                {dataDirectory}
+            });
+        }
+
+        const std::filesystem::path launchCacheRoot = resolved.rootBuilderLaunchCacheDirectory;
+        if (rootBuilderEnabled && !launchCacheRoot.empty())
+        {
+            const std::filesystem::path launchCacheDataTarget = launchCacheRoot / dataDirectory;
+            std::vector<std::filesystem::path> launchCacheDataMods;
+            if (isDirectory(dataTarget))
+            {
+                launchCacheDataMods.push_back(dataTarget);
+            }
+            launchCacheDataMods.insert(
+                launchCacheDataMods.end(),
+                dataMods.begin(),
+                dataMods.end());
+
+            if (!launchCacheDataMods.empty() || isDirectory(overwrite))
+            {
+                mounts.push_back(VfsMountDescriptor{
+                    launchCacheDataTarget,
+                    overwrite,
+                    launchCacheDataMods,
+                    std::vector<std::wstring>{L"root"}
+                });
+            }
+
+            std::vector<std::filesystem::path> launchCacheRootMods;
+            if (isDirectory(resolved.gamePath))
+            {
+                launchCacheRootMods.push_back(resolved.gamePath);
+            }
+            launchCacheRootMods.insert(
+                launchCacheRootMods.end(),
+                rootMods.begin(),
+                rootMods.end());
+
+            if (!launchCacheRootMods.empty() || isDirectory(rootOverwrite))
+            {
+                mounts.push_back(VfsMountDescriptor{
+                    launchCacheRoot,
+                    rootOverwrite,
+                    launchCacheRootMods,
+                    std::vector<std::wstring>{dataDirectory}
+                });
+            }
+        }
+
         const std::filesystem::path vfsDirectory = resolved.projectDirectory / L".flow" / L"vfs";
         const std::filesystem::path descriptorPath = vfsDirectory / L"vfs-config.json";
         const std::filesystem::path logPath = vfsDirectory / L"vfs.log";
 
         std::error_code error;
         std::filesystem::create_directories(overwrite, error);
+        if (mounts.size() > 1)
+        {
+            std::filesystem::create_directories(rootOverwrite, error);
+        }
         std::filesystem::create_directories(vfsDirectory, error);
 
         writeTextFile(
             descriptorPath,
-            toUtf8(buildDescriptor(target, overwrite, logPath, hookDll, mods)));
+            toUtf8(buildDescriptor(logPath, hookDll, mounts)));
 
         // Children inherit this, so the whole process tree shares one virtual view.
         SetEnvironmentVariableW(vfs::protocol::configEnvironmentVariable, descriptorPath.c_str());
@@ -257,7 +475,10 @@ namespace fluxora
 
         if (!started)
         {
-            return fallbackPlainLaunch("the game could not be started with the hook injected.");
+            const DWORD launchError = GetLastError();
+            return fallbackPlainLaunch(
+                ("the game could not be started with the hook injected. Win32 error: " +
+                 describeWin32Error(launchError) + "."));
         }
 
         CloseHandle(processInformation.hThread);
@@ -265,7 +486,8 @@ namespace fluxora
 
         logger_.write(
             LogLevel::Info,
-            "Game launched through the virtual file system (" + std::to_string(mods.size()) + " active mods).");
+            "Game launched through the virtual file system (" + std::to_string(mods.size()) +
+                " active mods, " + std::to_string(mounts.size()) + " mounts).");
 
         return GameExecutableLaunchResult{
             resolved.executable,

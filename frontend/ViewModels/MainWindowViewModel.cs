@@ -38,6 +38,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged
     private readonly SettingsService settingsService;
     private readonly LanguageCatalogService languageCatalogService;
     private readonly IFolderPickerService folderPickerService;
+    private readonly IExecutablePickerService executablePickerService;
     private readonly IBuildConfigPickerService buildConfigPickerService;
     private readonly IModArchivePickerService modArchivePickerService;
     private readonly IModInstallDialogService modInstallDialogService;
@@ -102,6 +103,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged
         SettingsService settingsService,
         LanguageCatalogService languageCatalogService,
         IFolderPickerService folderPickerService,
+        IExecutablePickerService executablePickerService,
         IBuildConfigPickerService buildConfigPickerService,
         IModArchivePickerService modArchivePickerService,
         IModInstallDialogService modInstallDialogService,
@@ -121,6 +123,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged
         this.settingsService = settingsService;
         this.languageCatalogService = languageCatalogService;
         this.folderPickerService = folderPickerService;
+        this.executablePickerService = executablePickerService;
         this.buildConfigPickerService = buildConfigPickerService;
         this.modArchivePickerService = modArchivePickerService;
         this.modInstallDialogService = modInstallDialogService;
@@ -1203,7 +1206,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged
 
     private void BrowseGamePath()
     {
-        string? selectedPath = folderPickerService.PickFolder("Выберите папку игры", GamePath);
+        string? selectedPath = executablePickerService.PickExecutable("Выберите исполняемый файл игры", GamePath);
         if (!string.IsNullOrWhiteSpace(selectedPath))
         {
             GamePath = selectedPath;
@@ -1304,7 +1307,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged
 
             if (string.IsNullOrWhiteSpace(GamePath))
             {
-                ValidationMessage = "Выберите папку игры.";
+                ValidationMessage = "Выберите .exe игры.";
                 return false;
             }
         }
@@ -1893,15 +1896,18 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged
             return;
         }
 
-        BuildPathSettings? saved = buildSettingsDialogService.EditBuildPaths(SelectedProject);
+        BuildSettingsResult? saved = buildSettingsDialogService.EditBuildPaths(SelectedProject);
         if (saved is null)
         {
             return;
         }
 
-        SelectedProject.ApplyPathSettings(saved);
+        SelectedProject.ApplyPathSettings(saved.Paths);
+        SelectedProject.Executables = saved.Executables.Select(executable => executable.Clone()).ToList();
+        SyncExecutableMenu(SelectedProject.Executables, lastSelectedExecutableId);
         OnPropertyChanged(nameof(WorkspaceSubtitle));
         OnPropertyChanged(nameof(SelectedProjectConfigText));
+        OnPropertyChanged(nameof(SelectedProjectExecutablesText));
         ActivityMessage = "Пути сборки сохранены. Обновляю рабочую область...";
 
         PrepareWorkspaceOptions(SelectedProject);

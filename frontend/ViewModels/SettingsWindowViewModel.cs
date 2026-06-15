@@ -28,7 +28,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
     private bool isNexusBusy;
     private bool isNexusModsConnectionPending;
     private bool isNexusModsLinked;
-    private string nexusModsTitle = "NexusMods";
+    private string nexusModsTitle = "Nexus Mods";
     private string nexusModsMessage = "Проверяю привязку...";
     private string nexusModsDetails = string.Empty;
     private LanguageOption? selectedLanguage;
@@ -1161,12 +1161,12 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
         if (message.Contains("locked by another process", StringComparison.OrdinalIgnoreCase) ||
             message.Contains("being used by another process", StringComparison.OrdinalIgnoreCase))
         {
-            return "Файл занят другим процессом. Fluxora попыталась закрыть приложение, но Windows все еще держит файл. Подробности записаны в папку logs рядом с Fluxora.App.exe.";
+            return "Файл занят другим процессом. Fluxora попыталась закрыть приложение, но Windows все еще держит файл. Подробности записаны в папку logs рядом с FluxoraModding.exe.";
         }
 
         if (message.Contains("Failed to write target file during import", StringComparison.OrdinalIgnoreCase))
         {
-            return "Не удалось записать файл при переносе. Подробности записаны в папку logs рядом с Fluxora.App.exe.";
+            return "Не удалось записать файл при переносе. Подробности записаны в папку logs рядом с FluxoraModding.exe.";
         }
 
         return message;
@@ -1209,14 +1209,12 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
     {
         IsNexusModsLinked = status.IsLinked;
         NexusModsTitle = string.IsNullOrWhiteSpace(status.DisplayName)
-            ? "NexusMods"
-            : $"NexusMods · {status.DisplayName}";
+            ? "Nexus Mods"
+            : $"Nexus Mods · {status.DisplayName}";
         NexusModsMessage = string.IsNullOrWhiteSpace(status.Message)
-            ? (status.IsLinked ? "NexusMods привязан." : "NexusMods не привязан.")
+            ? (status.IsLinked ? "Nexus Mods привязан." : "Nexus Mods не привязан.")
             : status.Message;
-        NexusModsDetails = string.IsNullOrWhiteSpace(status.RedirectUri)
-            ? string.Empty
-            : $"Callback: {status.RedirectUri}";
+        NexusModsDetails = string.Empty;
         OnPropertyChanged(nameof(IsNexusModsToggleChecked));
     }
 

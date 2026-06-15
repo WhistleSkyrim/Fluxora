@@ -3,18 +3,22 @@
 #include "FluxoraCore/Services/BuildPathSettingsService.hpp"
 #include "FluxoraCore/Services/ExecutableIconService.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
+#include "FluxoraCore/Storage/InstanceMetadataStore.hpp"
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cwctype>
 #include <fstream>
 #include <iterator>
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -33,9 +37,12 @@ namespace fluxora
             std::filesystem::path manifestDirectory;
             std::filesystem::path gamePath;
             std::filesystem::path projectDirectory;
+            std::filesystem::path modsDirectory;
+            std::filesystem::path overwriteDirectory;
             std::wstring templateId;
             std::wstring dataDirectory;
             std::wstring defaultProfile;
+            std::wstring scriptExtenderLoaderExecutable;
         };
 
         std::string toUtf8(const std::wstring& value)
@@ -55,6 +62,67 @@ namespace fluxora
 #else
             return std::string(value.begin(), value.end());
 #endif
+        }
+
+#ifdef _WIN32
+        std::string win32Message(DWORD value)
+        {
+            if (value == ERROR_SUCCESS)
+            {
+                return {};
+            }
+
+            LPWSTR raw = nullptr;
+            const DWORD length = FormatMessageW(
+                FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                    FORMAT_MESSAGE_FROM_SYSTEM |
+                    FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr,
+                value,
+                0,
+                reinterpret_cast<LPWSTR>(&raw),
+                0,
+                nullptr);
+            if (length == 0 || raw == nullptr)
+            {
+                return {};
+            }
+
+            std::wstring message(raw, raw + length);
+            LocalFree(raw);
+            while (!message.empty() &&
+                (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' '))
+            {
+                message.pop_back();
+            }
+
+            return toUtf8(message);
+        }
+
+        std::string describeWin32Error(DWORD value)
+        {
+            std::string description = std::to_string(value);
+            if (const std::string message = win32Message(value); !message.empty())
+            {
+                description += " (" + message + ")";
+            }
+
+            return description;
+        }
+#endif
+
+        std::string filesystemErrorForLog(const std::error_code& error)
+        {
+            if (!error)
+            {
+                return "none";
+            }
+
+            std::ostringstream stream;
+            stream << "value=" << error.value()
+                   << ", category=" << error.category().name()
+                   << ", message=" << error.message();
+            return stream.str();
         }
 
         std::wstring fromUtf8(const std::string& value)
@@ -146,6 +214,22 @@ namespace fluxora
             return value->asString();
         }
 
+        std::wstring readScriptExtenderLoaderExecutable(const JsonValue& manifest)
+        {
+            const JsonValue* scriptExtender = manifest.find(L"scriptExtender");
+            if (scriptExtender == nullptr || scriptExtender->isNull())
+            {
+                return {};
+            }
+
+            if (!scriptExtender->isObject())
+            {
+                throw std::invalid_argument("Build config script extender must be an object or null.");
+            }
+
+            return readStringOrDefault(*scriptExtender, L"loaderExecutable");
+        }
+
         std::filesystem::path resolveManifestPath(
             const std::wstring& text,
             const std::filesystem::path& relativeRoot)
@@ -197,6 +281,7 @@ namespace fluxora
             std::wstring templateId = readStringOrDefault(manifest, L"templateId");
             std::wstring dataDirectory = readStringOrDefault(manifest, L"dataDirectory", L"Data");
             std::wstring defaultProfile = readStringOrDefault(manifest, L"defaultProfile", L"Default");
+            std::wstring scriptExtenderLoaderExecutable = readScriptExtenderLoaderExecutable(manifest);
 
             return ProjectExecutableContext{
                 std::move(manifest),
@@ -204,9 +289,12 @@ namespace fluxora
                 manifestDirectory,
                 gamePath,
                 projectDirectory,
+                {},
+                {},
                 std::move(templateId),
                 std::move(dataDirectory),
-                std::move(defaultProfile)
+                std::move(defaultProfile),
+                std::move(scriptExtenderLoaderExecutable)
             };
         }
 
@@ -242,6 +330,813 @@ namespace fluxora
         bool hasExecutableExtension(const std::wstring& pathText)
         {
             return toLower(std::filesystem::path(pathText).extension().wstring()) == L".exe";
+        }
+
+        bool equalsIgnoreCase(std::wstring_view left, std::wstring_view right)
+        {
+            return toLower(std::wstring(left)) == toLower(std::wstring(right));
+        }
+
+        bool isRegularFile(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_regular_file(path, error);
+        }
+
+        bool hasExecutableImageSignature(const std::filesystem::path& path)
+        {
+            std::ifstream file(path, std::ios::in | std::ios::binary);
+            if (!file)
+            {
+                return false;
+            }
+
+            std::array<unsigned char, 2> signature{};
+            file.read(reinterpret_cast<char*>(signature.data()), static_cast<std::streamsize>(signature.size()));
+            return file.gcount() == static_cast<std::streamsize>(signature.size()) &&
+                signature[0] == 'M' &&
+                signature[1] == 'Z';
+        }
+
+        bool isReadableExecutableFile(const std::filesystem::path& path)
+        {
+            return isRegularFile(path) && hasExecutableImageSignature(path);
+        }
+
+        bool isDirectory(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_directory(path, error);
+        }
+
+        bool supportsRootBuilder(std::wstring_view templateId)
+        {
+            return toLower(std::wstring(templateId)).find(L"skyrim") != std::wstring::npos;
+        }
+
+        std::wstring comparablePathText(const std::filesystem::path& path)
+        {
+            std::wstring text = std::filesystem::absolute(path).lexically_normal().wstring();
+            std::replace(text.begin(), text.end(), L'/', L'\\');
+            while (text.size() > 1 && (text.back() == L'\\' || text.back() == L'/'))
+            {
+                text.pop_back();
+            }
+            return toLower(std::move(text));
+        }
+
+        std::optional<std::filesystem::path> relativePathIfInsideLexical(
+            const std::filesystem::path& child,
+            const std::filesystem::path& root)
+        {
+            if (child.empty() || root.empty())
+            {
+                return std::nullopt;
+            }
+
+            const std::filesystem::path normalizedChild =
+                std::filesystem::absolute(child).lexically_normal();
+            const std::filesystem::path normalizedRoot =
+                std::filesystem::absolute(root).lexically_normal();
+            const std::wstring childText = comparablePathText(normalizedChild);
+            const std::wstring rootText = comparablePathText(normalizedRoot);
+
+            if (childText == rootText)
+            {
+                return std::filesystem::path{};
+            }
+
+            if (childText.size() <= rootText.size() ||
+                childText.compare(0, rootText.size(), rootText) != 0 ||
+                (childText[rootText.size()] != L'\\' && childText[rootText.size()] != L'/'))
+            {
+                return std::nullopt;
+            }
+
+            std::wstring childNative = normalizedChild.wstring();
+            std::replace(childNative.begin(), childNative.end(), L'/', L'\\');
+            return std::filesystem::path(childNative.substr(rootText.size() + 1));
+        }
+
+        bool isUsableRelativePath(const std::filesystem::path& path)
+        {
+            if (path.empty() || path.is_absolute())
+            {
+                return false;
+            }
+
+            for (const std::filesystem::path& part : path)
+            {
+                if (part == L"..")
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        bool firstPathComponentEquals(
+            const std::filesystem::path& path,
+            std::wstring_view expected)
+        {
+            for (const std::filesystem::path& part : path)
+            {
+                const std::wstring text = part.wstring();
+                if (text.empty() || text == L"." || text == L"\\")
+                {
+                    continue;
+                }
+
+                return equalsIgnoreCase(text, expected);
+            }
+
+            return false;
+        }
+
+        std::optional<std::filesystem::path> rootBuilderRelativeFromImportedModsPath(
+            const std::filesystem::path& path)
+        {
+            std::vector<std::filesystem::path> parts;
+            for (const std::filesystem::path& part : path.lexically_normal())
+            {
+                const std::wstring text = part.wstring();
+                if (text.empty() || text == L"." || text == L"\\")
+                {
+                    continue;
+                }
+
+                parts.push_back(part);
+            }
+
+            if (parts.size() < 4 ||
+                !equalsIgnoreCase(parts[0].wstring(), L"mods") ||
+                !equalsIgnoreCase(parts[2].wstring(), L"root"))
+            {
+                return std::nullopt;
+            }
+
+            std::filesystem::path relative;
+            for (std::size_t index = 3; index < parts.size(); ++index)
+            {
+                relative /= parts[index];
+            }
+
+            return isUsableRelativePath(relative)
+                ? std::optional<std::filesystem::path>(relative)
+                : std::nullopt;
+        }
+
+        std::wstring safeDirectoryName(std::wstring value)
+        {
+            for (wchar_t& character : value)
+            {
+                const bool keep =
+                    (character >= L'a' && character <= L'z') ||
+                    (character >= L'A' && character <= L'Z') ||
+                    (character >= L'0' && character <= L'9') ||
+                    character == L'-' ||
+                    character == L'_';
+                if (!keep)
+                {
+                    character = L'_';
+                }
+            }
+
+            return value.empty() ? std::wstring(L"root") : value;
+        }
+
+        std::vector<std::filesystem::path> activeProfileModPaths(const ProjectExecutableContext& context)
+        {
+            if (context.projectDirectory.empty() || context.modsDirectory.empty())
+            {
+                return {};
+            }
+
+            try
+            {
+                const std::wstring profile = context.defaultProfile.empty() ? L"Default" : context.defaultProfile;
+                std::vector<std::filesystem::path> mods;
+                for (const ProfileOrderItemRecord& item : InstanceMetadataStore::listProfileOrderItems(
+                         context.projectDirectory,
+                         profile,
+                         context.modsDirectory))
+                {
+                    if (item.kind == L"mod" &&
+                        item.hasMod &&
+                        item.mod.state != L"disabled" &&
+                        !item.mod.path.empty())
+                    {
+                        mods.push_back(item.mod.path);
+                    }
+                }
+
+                return mods;
+            }
+            catch (...)
+            {
+                return {};
+            }
+        }
+
+        bool isScriptExtenderLoaderName(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& path)
+        {
+            const std::wstring fileName = path.filename().wstring();
+            if (fileName.empty())
+            {
+                return false;
+            }
+
+            std::vector<std::wstring> candidateNames;
+            if (!context.scriptExtenderLoaderExecutable.empty())
+            {
+                candidateNames.push_back(context.scriptExtenderLoaderExecutable);
+            }
+            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            {
+                candidateNames.push_back(L"skse64_loader.exe");
+                candidateNames.push_back(L"sksevr_loader.exe");
+                candidateNames.push_back(L"skse_loader.exe");
+            }
+
+            for (const std::wstring& candidateName : candidateNames)
+            {
+                if (equalsIgnoreCase(fileName, candidateName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        std::optional<std::filesystem::path> gameRootScriptExtenderLoader(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& executablePath)
+        {
+            if (context.gamePath.empty() || !isScriptExtenderLoaderName(context, executablePath))
+            {
+                return std::nullopt;
+            }
+
+            const std::filesystem::path candidate = context.gamePath / executablePath.filename();
+            if (isReadableExecutableFile(candidate))
+            {
+                return std::filesystem::absolute(candidate);
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<std::filesystem::path> rootBuilderVirtualRelativePath(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& executablePath)
+        {
+            if (!supportsRootBuilder(context.templateId) || executablePath.empty())
+            {
+                return std::nullopt;
+            }
+
+            std::filesystem::path relative;
+            if (executablePath.is_absolute())
+            {
+                for (const std::filesystem::path& mod : activeProfileModPaths(context))
+                {
+                    const std::optional<std::filesystem::path> underModRoot =
+                        relativePathIfInsideLexical(executablePath, mod / L"root");
+                    if (underModRoot.has_value() && isUsableRelativePath(underModRoot.value()))
+                    {
+                        relative = underModRoot.value();
+                        break;
+                    }
+                }
+
+                if (relative.empty() && !context.overwriteDirectory.empty())
+                {
+                    const std::optional<std::filesystem::path> underOverwriteRoot =
+                        relativePathIfInsideLexical(executablePath, context.overwriteDirectory / L"root");
+                    if (underOverwriteRoot.has_value() && isUsableRelativePath(underOverwriteRoot.value()))
+                    {
+                        relative = underOverwriteRoot.value();
+                    }
+                }
+
+                const std::optional<std::filesystem::path> underGame =
+                    relativePathIfInsideLexical(executablePath, context.gamePath);
+                if (relative.empty() && underGame.has_value())
+                {
+                    relative = underGame.value();
+                }
+                else if (relative.empty() && isScriptExtenderLoaderName(context, executablePath))
+                {
+                    relative = executablePath.filename();
+                }
+                else if (relative.empty())
+                {
+                    return std::nullopt;
+                }
+            }
+            else
+            {
+                if (const std::optional<std::filesystem::path> importedModsPath =
+                        rootBuilderRelativeFromImportedModsPath(executablePath);
+                    importedModsPath.has_value())
+                {
+                    relative = importedModsPath.value();
+                }
+                else
+                {
+                    relative = executablePath.lexically_normal();
+                }
+            }
+
+            return isUsableRelativePath(relative)
+                ? std::optional<std::filesystem::path>(relative)
+                : std::nullopt;
+        }
+
+        std::optional<std::filesystem::path> rootBuilderBackingFile(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& executablePath)
+        {
+            const std::optional<std::filesystem::path> relative =
+                rootBuilderVirtualRelativePath(context, executablePath);
+            if (!relative.has_value())
+            {
+                return std::nullopt;
+            }
+
+            std::optional<std::filesystem::path> winner;
+            for (const std::filesystem::path& mod : activeProfileModPaths(context))
+            {
+                const std::filesystem::path candidate = mod / L"root" / relative.value();
+                if (isReadableExecutableFile(candidate))
+                {
+                    winner = std::filesystem::absolute(candidate);
+                }
+            }
+
+            if (!context.overwriteDirectory.empty())
+            {
+                const std::filesystem::path candidate =
+                    context.overwriteDirectory / L"root" / relative.value();
+                if (isReadableExecutableFile(candidate))
+                {
+                    winner = std::filesystem::absolute(candidate);
+                }
+            }
+
+            return winner;
+        }
+
+        std::optional<std::filesystem::path> rootBuilderVirtualPathForBackingFile(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& backingPath)
+        {
+            if (!supportsRootBuilder(context.templateId) || context.gamePath.empty())
+            {
+                return std::nullopt;
+            }
+
+            for (const std::filesystem::path& mod : activeProfileModPaths(context))
+            {
+                const std::optional<std::filesystem::path> relative =
+                    relativePathIfInsideLexical(backingPath, mod / L"root");
+                if (relative.has_value() && isUsableRelativePath(relative.value()))
+                {
+                    return context.gamePath / relative.value();
+                }
+            }
+
+            if (!context.overwriteDirectory.empty())
+            {
+                const std::optional<std::filesystem::path> relative =
+                    relativePathIfInsideLexical(backingPath, context.overwriteDirectory / L"root");
+                if (relative.has_value() && isUsableRelativePath(relative.value()))
+                {
+                    return context.gamePath / relative.value();
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        struct RootBuilderBackingLocation
+        {
+            std::filesystem::path modDirectory;
+            std::filesystem::path rootDirectory;
+            std::filesystem::path relativePath;
+        };
+
+        struct RootBuilderLaunchCache
+        {
+            std::filesystem::path executablePath;
+            std::filesystem::path rootDirectory;
+        };
+
+        std::optional<RootBuilderBackingLocation> rootBuilderBackingLocation(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& backingPath)
+        {
+            if (!supportsRootBuilder(context.templateId))
+            {
+                return std::nullopt;
+            }
+
+            for (const std::filesystem::path& mod : activeProfileModPaths(context))
+            {
+                const std::filesystem::path root = mod / L"root";
+                const std::optional<std::filesystem::path> relative =
+                    relativePathIfInsideLexical(backingPath, root);
+                if (relative.has_value() && isUsableRelativePath(relative.value()))
+                {
+                    return RootBuilderBackingLocation{
+                        mod,
+                        root,
+                        relative.value()
+                    };
+                }
+            }
+
+            if (!context.overwriteDirectory.empty())
+            {
+                const std::filesystem::path root = context.overwriteDirectory / L"root";
+                const std::optional<std::filesystem::path> relative =
+                    relativePathIfInsideLexical(backingPath, root);
+                if (relative.has_value() && isUsableRelativePath(relative.value()))
+                {
+                    return RootBuilderBackingLocation{
+                        context.overwriteDirectory,
+                        root,
+                        relative.value()
+                    };
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<RootBuilderLaunchCache> prepareRootBuilderLaunchCache(
+            const ProjectExecutableContext& context,
+            const std::filesystem::path& backingPath,
+            Logger& logger)
+        {
+            const std::optional<RootBuilderBackingLocation> location =
+                rootBuilderBackingLocation(context, backingPath);
+            if (!location.has_value())
+            {
+                return std::nullopt;
+            }
+
+            const bool executableIsUnderData =
+                firstPathComponentEquals(location->relativePath, context.dataDirectory.empty()
+                    ? std::wstring_view(L"Data")
+                    : std::wstring_view(context.dataDirectory));
+            const std::filesystem::path cacheRoot =
+                context.projectDirectory /
+                L".flow" /
+                L"root-launch" /
+                safeDirectoryName(location->modDirectory.filename().wstring());
+
+            std::error_code error;
+            std::filesystem::remove_all(cacheRoot, error);
+            if (error)
+            {
+                logger.write(
+                    LogLevel::Warning,
+                    "Root Builder launch cache could not be cleared: " +
+                        toUtf8(cacheRoot.wstring()) + " (" + filesystemErrorForLog(error) + ").");
+                return std::nullopt;
+            }
+
+            error.clear();
+            std::filesystem::create_directories(cacheRoot, error);
+            if (error)
+            {
+                logger.write(
+                    LogLevel::Warning,
+                    "Root Builder launch cache directory could not be created: " +
+                        toUtf8(cacheRoot.wstring()) + " (" + filesystemErrorForLog(error) + ").");
+                return std::nullopt;
+            }
+
+            bool failed = false;
+            std::string failure;
+            if (!context.gamePath.empty())
+            {
+                std::filesystem::directory_iterator gameIterator(
+                    context.gamePath,
+                    std::filesystem::directory_options::skip_permission_denied,
+                    error);
+                const std::filesystem::directory_iterator gameEnd;
+                if (error)
+                {
+                    failed = true;
+                    failure = "could not enumerate " + toUtf8(context.gamePath.wstring()) +
+                        " (" + filesystemErrorForLog(error) + ")";
+                }
+
+                while (!failed && !error && gameIterator != gameEnd)
+                {
+                    const std::filesystem::path current = gameIterator->path();
+                    error.clear();
+                    if (gameIterator->is_regular_file(error))
+                    {
+                        const std::filesystem::path destination = cacheRoot / current.filename();
+                        std::filesystem::create_directories(destination.parent_path(), error);
+                        if (!error)
+                        {
+                            std::filesystem::copy_file(
+                                current,
+                                destination,
+                                std::filesystem::copy_options::overwrite_existing,
+                                error);
+                        }
+                        if (error)
+                        {
+                            failed = true;
+                            failure = "could not copy " + toUtf8(current.wstring()) +
+                                " to " + toUtf8(destination.wstring()) +
+                                " (" + filesystemErrorForLog(error) + ")";
+                            break;
+                        }
+                    }
+                    else if (error)
+                    {
+                        failed = true;
+                        failure = "could not inspect " + toUtf8(current.wstring()) +
+                            " (" + filesystemErrorForLog(error) + ")";
+                        break;
+                    }
+
+                    gameIterator.increment(error);
+                    if (error)
+                    {
+                        failed = true;
+                        failure = "could not continue enumerating " + toUtf8(context.gamePath.wstring()) +
+                            " (" + filesystemErrorForLog(error) + ")";
+                    }
+                }
+
+                error.clear();
+                std::filesystem::create_directories(
+                    cacheRoot / (context.dataDirectory.empty()
+                        ? std::filesystem::path(L"Data")
+                        : std::filesystem::path(context.dataDirectory)),
+                    error);
+                if (error)
+                {
+                    failed = true;
+                    failure = "could not create launch cache Data directory under " +
+                        toUtf8(cacheRoot.wstring()) +
+                        " (" + filesystemErrorForLog(error) + ")";
+                }
+            }
+
+            std::vector<std::filesystem::path> overlayRoots;
+            for (const std::filesystem::path& mod : activeProfileModPaths(context))
+            {
+                const std::filesystem::path root = mod / L"root";
+                if (isDirectory(root))
+                {
+                    overlayRoots.push_back(root);
+                }
+            }
+            if (!context.overwriteDirectory.empty())
+            {
+                const std::filesystem::path root = context.overwriteDirectory / L"root";
+                if (isDirectory(root))
+                {
+                    overlayRoots.push_back(root);
+                }
+            }
+
+            for (const std::filesystem::path& overlayRoot : overlayRoots)
+            {
+                if (failed)
+                {
+                    break;
+                }
+
+                error.clear();
+                std::filesystem::recursive_directory_iterator iterator(
+                    overlayRoot,
+                    std::filesystem::directory_options::skip_permission_denied,
+                    error);
+                const std::filesystem::recursive_directory_iterator end;
+                if (error)
+                {
+                    failed = true;
+                    failure = "could not enumerate " + toUtf8(overlayRoot.wstring()) +
+                        " (" + filesystemErrorForLog(error) + ")";
+                    break;
+                }
+
+                while (!error && iterator != end)
+                {
+                    const std::filesystem::path current = iterator->path();
+                    const std::optional<std::filesystem::path> relative =
+                        relativePathIfInsideLexical(current, overlayRoot);
+                    if (!relative.has_value() || relative->empty())
+                    {
+                        iterator.increment(error);
+                        continue;
+                    }
+
+                    if (!executableIsUnderData &&
+                        firstPathComponentEquals(*relative, context.dataDirectory.empty()
+                            ? std::wstring_view(L"Data")
+                            : std::wstring_view(context.dataDirectory)))
+                    {
+                        error.clear();
+                        if (iterator->is_directory(error))
+                        {
+                            iterator.disable_recursion_pending();
+                        }
+                        if (error)
+                        {
+                            failed = true;
+                            failure = "could not inspect " + toUtf8(current.wstring()) +
+                                " (" + filesystemErrorForLog(error) + ")";
+                            break;
+                        }
+
+                        iterator.increment(error);
+                        if (error)
+                        {
+                            failed = true;
+                            failure = "could not continue enumerating " + toUtf8(overlayRoot.wstring()) +
+                                " (" + filesystemErrorForLog(error) + ")";
+                        }
+                        continue;
+                    }
+
+                    const std::filesystem::path destination = cacheRoot / relative.value();
+                    error.clear();
+                    if (iterator->is_directory(error))
+                    {
+                        std::filesystem::create_directories(destination, error);
+                    }
+                    else if (iterator->is_regular_file(error))
+                    {
+                        std::filesystem::create_directories(destination.parent_path(), error);
+                        error.clear();
+                        std::filesystem::copy_file(
+                            current,
+                            destination,
+                            std::filesystem::copy_options::overwrite_existing,
+                            error);
+                    }
+                    if (error)
+                    {
+                        failed = true;
+                        failure = "could not copy " + toUtf8(current.wstring()) +
+                            " to " + toUtf8(destination.wstring()) +
+                            " (" + filesystemErrorForLog(error) + ")";
+                        break;
+                    }
+
+                    iterator.increment(error);
+                    if (error)
+                    {
+                        failed = true;
+                        failure = "could not continue enumerating " + toUtf8(overlayRoot.wstring()) +
+                            " (" + filesystemErrorForLog(error) + ")";
+                    }
+                }
+
+                if (failed)
+                {
+                    break;
+                }
+            }
+
+            if (failed)
+            {
+                logger.write(
+                    LogLevel::Warning,
+                    "Root Builder launch cache could not be prepared: " + failure + ".");
+                error.clear();
+                std::filesystem::remove_all(cacheRoot, error);
+                return std::nullopt;
+            }
+
+            const std::filesystem::path cachedExecutable = cacheRoot / location->relativePath;
+            if (!isReadableExecutableFile(cachedExecutable))
+            {
+                logger.write(
+                    LogLevel::Warning,
+                    "Root Builder launch cache did not contain a readable executable: " +
+                        toUtf8(cachedExecutable.wstring()) + ".");
+                error.clear();
+                std::filesystem::remove_all(cacheRoot, error);
+                return std::nullopt;
+            }
+
+            std::error_code sourceSizeError;
+            std::error_code cachedSizeError;
+            const std::uintmax_t sourceSize = std::filesystem::file_size(backingPath, sourceSizeError);
+            const std::uintmax_t cachedSize = std::filesystem::file_size(cachedExecutable, cachedSizeError);
+            if (sourceSizeError || cachedSizeError || sourceSize != cachedSize)
+            {
+                logger.write(
+                    LogLevel::Warning,
+                    "Root Builder launch cache executable failed validation: source=\"" +
+                        toUtf8(backingPath.wstring()) +
+                        "\", cached=\"" +
+                        toUtf8(cachedExecutable.wstring()) +
+                        "\", sourceSize=" +
+                        std::to_string(sourceSize) +
+                        ", cachedSize=" +
+                        std::to_string(cachedSize) +
+                        ", sourceError=(" +
+                        filesystemErrorForLog(sourceSizeError) +
+                        "), cachedError=(" +
+                        filesystemErrorForLog(cachedSizeError) +
+                        ").");
+                error.clear();
+                std::filesystem::remove_all(cacheRoot, error);
+                return std::nullopt;
+            }
+
+            return RootBuilderLaunchCache{
+                std::filesystem::absolute(cachedExecutable),
+                std::filesystem::absolute(cacheRoot)
+            };
+        }
+
+        std::optional<std::wstring> defaultGameExecutableName(
+            const ProjectExecutableContext& context)
+        {
+            std::vector<std::wstring> candidateNames;
+            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            {
+                candidateNames.push_back(L"SkyrimSE.exe");
+                candidateNames.push_back(L"Skyrim SE.exe");
+                candidateNames.push_back(L"SkyrimSELauncher.exe");
+            }
+
+            candidateNames.push_back(L"SkyrimSE.exe");
+            candidateNames.push_back(L"Skyrim SE.exe");
+            candidateNames.push_back(L"Fallout4.exe");
+            candidateNames.push_back(L"Starfield.exe");
+
+            std::set<std::wstring> seen;
+            for (const std::wstring& candidateName : candidateNames)
+            {
+                if (!seen.insert(toLower(candidateName)).second)
+                {
+                    continue;
+                }
+
+                if (isRegularFile(context.gamePath / std::filesystem::path(candidateName)))
+                {
+                    return candidateName;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<GameExecutable> defaultGameExecutable(
+            const ProjectExecutableContext& context)
+        {
+            const std::optional<std::wstring> executableName = defaultGameExecutableName(context);
+            if (!executableName.has_value())
+            {
+                return std::nullopt;
+            }
+
+            std::wstring displayName = fileNameWithoutExtension(executableName.value());
+            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            {
+                displayName = L"Skyrim Special Edition";
+            }
+
+            return GameExecutable{
+                L"game",
+                displayName,
+                executableName.value(),
+                {},
+                {}
+            };
+        }
+
+        bool hasExecutablePath(
+            const std::vector<GameExecutable>& executables,
+            std::wstring_view executablePath)
+        {
+            for (const GameExecutable& executable : executables)
+            {
+                if (equalsIgnoreCase(executable.executablePath, executablePath))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         std::wstring slugifyExecutableId(const GameExecutable& executable, int fallbackIndex)
@@ -328,6 +1223,20 @@ namespace fluxora
             }
 
             return normalized;
+        }
+
+        std::vector<GameExecutable> withDefaultGameExecutable(
+            const ProjectExecutableContext& context,
+            std::vector<GameExecutable> executables)
+        {
+            if (const std::optional<GameExecutable> defaultExecutable = defaultGameExecutable(context);
+                defaultExecutable.has_value() &&
+                !hasExecutablePath(executables, defaultExecutable->executablePath))
+            {
+                executables.insert(executables.begin(), defaultExecutable.value());
+            }
+
+            return normalizeExecutables(executables);
         }
 
         GameExecutable readExecutableObject(const JsonValue& value, int index)
@@ -471,11 +1380,29 @@ namespace fluxora
             const std::wstring& pathText)
         {
             std::filesystem::path path(pathText);
+            if (const std::optional<std::filesystem::path> rootBuilderFile =
+                    rootBuilderBackingFile(context, path);
+                rootBuilderFile.has_value())
+            {
+                return rootBuilderFile.value();
+            }
+
+            if (const std::optional<std::filesystem::path> scriptExtenderLoader =
+                    gameRootScriptExtenderLoader(context, path);
+                scriptExtenderLoader.has_value())
+            {
+                return scriptExtenderLoader.value();
+            }
+
             std::vector<std::filesystem::path> candidates;
 
             if (path.is_absolute())
             {
                 candidates.push_back(path);
+                if (!context.gamePath.empty())
+                {
+                    candidates.push_back(context.gamePath / path.filename());
+                }
             }
             else
             {
@@ -493,7 +1420,7 @@ namespace fluxora
 
             for (const auto& candidate : candidates)
             {
-                if (std::filesystem::exists(candidate) && std::filesystem::is_regular_file(candidate))
+                if (isReadableExecutableFile(candidate))
                 {
                     return std::filesystem::absolute(candidate);
                 }
@@ -511,7 +1438,7 @@ namespace fluxora
                 return *resolved;
             }
 
-            throw std::invalid_argument("Executable file does not exist.");
+            throw std::invalid_argument("Executable file does not exist or is not a readable Windows executable.");
         }
 
         void resolveExecutableIconPaths(
@@ -548,6 +1475,11 @@ namespace fluxora
             if (path.is_absolute())
             {
                 candidates.push_back(path);
+                if (!context.gamePath.empty() &&
+                    equalsIgnoreCase(path.filename().wstring(), context.gamePath.filename().wstring()))
+                {
+                    candidates.push_back(context.gamePath);
+                }
             }
             else
             {
@@ -564,7 +1496,7 @@ namespace fluxora
 
             for (const auto& candidate : candidates)
             {
-                if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate))
+                if (isDirectory(candidate))
                 {
                     return std::filesystem::absolute(candidate);
                 }
@@ -625,8 +1557,12 @@ namespace fluxora
         const std::filesystem::path& configPath) const
     {
         ProjectExecutableContext context = readProjectExecutableContext(configPath);
-        context.gamePath = pathSettings_.loadForConfig(configPath).gameDirectory;
-        std::vector<GameExecutable> executables = readExecutablesFromManifest(context.manifest);
+        const BuildPathSettings settings = pathSettings_.loadForConfig(configPath);
+        context.gamePath = settings.gameDirectory;
+        context.modsDirectory = settings.modsDirectory;
+        context.overwriteDirectory = settings.overwriteDirectory;
+        std::vector<GameExecutable> executables =
+            withDefaultGameExecutable(context, readExecutablesFromManifest(context.manifest));
         resolveExecutableIconPaths(context, iconService_, executables);
         return executables;
     }
@@ -636,7 +1572,10 @@ namespace fluxora
         const std::vector<GameExecutable>& executables) const
     {
         ProjectExecutableContext context = readProjectExecutableContext(configPath);
-        context.gamePath = pathSettings_.loadForConfig(configPath).gameDirectory;
+        const BuildPathSettings settings = pathSettings_.loadForConfig(configPath);
+        context.gamePath = settings.gameDirectory;
+        context.modsDirectory = settings.modsDirectory;
+        context.overwriteDirectory = settings.overwriteDirectory;
         std::vector<GameExecutable> normalized = normalizeExecutables(executables);
         writeManifestWithExecutables(context, normalized);
         resolveExecutableIconPaths(context, iconService_, normalized);
@@ -654,8 +1593,12 @@ namespace fluxora
         }
 
         ProjectExecutableContext context = readProjectExecutableContext(configPath);
-        context.gamePath = pathSettings_.loadForConfig(configPath).gameDirectory;
-        std::vector<GameExecutable> executables = readExecutablesFromManifest(context.manifest);
+        const BuildPathSettings settings = pathSettings_.loadForConfig(configPath);
+        context.gamePath = settings.gameDirectory;
+        context.modsDirectory = settings.modsDirectory;
+        context.overwriteDirectory = settings.overwriteDirectory;
+        std::vector<GameExecutable> executables =
+            withDefaultGameExecutable(context, readExecutablesFromManifest(context.manifest));
         resolveExecutableIconPaths(context, iconService_, executables);
         const auto match = std::find_if(
             executables.begin(),
@@ -666,14 +1609,49 @@ namespace fluxora
             throw std::invalid_argument("Executable was not found.");
         }
 
-        const std::filesystem::path resolvedExecutablePath = resolveExistingFile(context, match->executablePath);
+        std::filesystem::path resolvedExecutablePath = resolveExistingFile(context, match->executablePath);
+        std::filesystem::path rootBuilderLaunchCacheDirectory;
+        const std::optional<std::filesystem::path> rootBuilderVirtualPath =
+            rootBuilderVirtualPathForBackingFile(context, resolvedExecutablePath);
+        if (rootBuilderVirtualPath.has_value())
+        {
+            if (const std::optional<RootBuilderLaunchCache> cachedExecutable =
+                    prepareRootBuilderLaunchCache(context, resolvedExecutablePath, logger_);
+                cachedExecutable.has_value())
+            {
+                logger_.write(
+                    LogLevel::Info,
+                    "Prepared Root Builder launch cache: " + toUtf8(cachedExecutable->executablePath.wstring()));
+                resolvedExecutablePath = cachedExecutable->executablePath;
+                rootBuilderLaunchCacheDirectory = cachedExecutable->rootDirectory;
+            }
+            else
+            {
+                logger_.write(
+                    LogLevel::Warning,
+                    "Root Builder launch cache could not be prepared; launching backing executable directly: " +
+                        toUtf8(resolvedExecutablePath.wstring()));
+            }
+        }
+
         if (!hasExecutableExtension(resolvedExecutablePath.wstring()))
         {
             throw std::invalid_argument("Executable path must point to an .exe file.");
         }
 
-        const std::filesystem::path resolvedWorkingDirectory =
-            resolveWorkingDirectory(context, *match, resolvedExecutablePath);
+        std::filesystem::path resolvedWorkingDir;
+        if (rootBuilderVirtualPath.has_value() && !context.gamePath.empty())
+        {
+            resolvedWorkingDir = context.gamePath;
+        }
+        else if (isScriptExtenderLoaderName(context, resolvedExecutablePath))
+        {
+            resolvedWorkingDir = resolvedExecutablePath.parent_path();
+        }
+        else
+        {
+            resolvedWorkingDir = resolveWorkingDirectory(context, *match, resolvedExecutablePath);
+        }
 
         std::wstring commandLine = quoteCommandLineArgument(resolvedExecutablePath.wstring());
         if (!match->arguments.empty())
@@ -682,12 +1660,18 @@ namespace fluxora
             commandLine.append(match->arguments);
         }
 
+        logger_.write(
+            LogLevel::Info,
+            "Resolved executable launch: exe=\"" + toUtf8(resolvedExecutablePath.wstring()) +
+                "\", cwd=\"" + toUtf8(resolvedWorkingDir.wstring()) + "\".");
+
         return ResolvedExecutableLaunch{
             *match,
             resolvedExecutablePath,
-            resolvedWorkingDirectory,
+            resolvedWorkingDir,
             std::move(commandLine),
             context.gamePath,
+            rootBuilderLaunchCacheDirectory,
             context.projectDirectory,
             context.templateId,
             context.dataDirectory,
@@ -721,7 +1705,11 @@ namespace fluxora
             &processInformation);
         if (!started)
         {
-            throw std::runtime_error("Failed to launch executable.");
+            const DWORD error = GetLastError();
+            throw std::runtime_error(
+                "Failed to launch executable \"" + toUtf8(resolved.resolvedExecutablePath.wstring()) +
+                    "\" from \"" + toUtf8(resolved.resolvedWorkingDirectory.wstring()) +
+                    "\". Win32 error: " + describeWin32Error(error) + ".");
         }
 
         CloseHandle(processInformation.hThread);

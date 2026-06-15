@@ -9,30 +9,49 @@ namespace Fluxora.App.ViewModels;
 
 public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
 {
+    private static readonly string[] PrimaryGameExecutableNames =
+    {
+        "SkyrimSE.exe",
+        "Skyrim SE.exe",
+        "SkyrimSELauncher.exe",
+        "SkyrimVR.exe",
+        "SkyrimVRLauncher.exe",
+        "TESV.exe",
+        "SkyrimLauncher.exe",
+        "Fallout4.exe",
+        "Starfield.exe"
+    };
+
     private readonly CoreBridgeService coreBridgeService;
     private readonly IFolderPickerService folderPickerService;
+    private readonly IExecutablePickerService executablePickerService;
     private readonly ModProject project;
 
     private bool isBusy;
     private string statusText = "Загружаю пути сборки...";
     private string errorText = string.Empty;
     private string gameDirectory = string.Empty;
+    private string gameExecutablePath = string.Empty;
     private string modsDirectory = string.Empty;
     private string profilesDirectory = string.Empty;
     private string downloadsDirectory = string.Empty;
     private string overwriteDirectory = string.Empty;
+    private List<GameExecutableEntry> executables;
 
     public BuildSettingsWindowViewModel(
         CoreBridgeService coreBridgeService,
         IFolderPickerService folderPickerService,
+        IExecutablePickerService executablePickerService,
         ModProject project)
     {
         this.coreBridgeService = coreBridgeService;
         this.folderPickerService = folderPickerService;
+        this.executablePickerService = executablePickerService;
         this.project = project;
+        executables = project.Executables.Select(executable => executable.Clone()).ToList();
 
-        BrowseGameDirectoryCommand = new RelayCommand(
-            () => BrowsePath("Путь к игре", GameDirectory, value => GameDirectory = value),
+        BrowseGameExecutableCommand = new RelayCommand(
+            BrowseGameExecutable,
             () => !IsBusy);
         BrowseModsDirectoryCommand = new RelayCommand(
             () => BrowsePath("Папка модов", ModsDirectory, value => ModsDirectory = value),
@@ -50,7 +69,7 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ICommand BrowseGameDirectoryCommand { get; }
+    public ICommand BrowseGameExecutableCommand { get; }
     public ICommand BrowseModsDirectoryCommand { get; }
     public ICommand BrowseProfilesDirectoryCommand { get; }
     public ICommand BrowseDownloadsDirectoryCommand { get; }
@@ -60,7 +79,7 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
 
     public string ProjectDirectory => project.ProjectDirectory;
 
-    public BuildPathSettings? SavedSettings { get; private set; }
+    public BuildSettingsResult? SavedResult { get; private set; }
 
     public bool IsBusy
     {
@@ -100,6 +119,21 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
         set => SetField(ref gameDirectory, value);
     }
 
+    public string GameExecutablePath
+    {
+        get => gameExecutablePath;
+        set
+        {
+            if (SetField(ref gameExecutablePath, value))
+            {
+                if (TryGameDirectoryFromExecutable(value, out string directory))
+                {
+                    GameDirectory = directory;
+                }
+            }
+        }
+    }
+
     public string ModsDirectory
     {
         get => modsDirectory;
@@ -131,12 +165,14 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
             IsBusy = true;
             ErrorText = string.Empty;
             BuildPathSettings settings = await coreBridgeService.GetBuildPathSettingsAsync(project.ConfigPath);
-            ApplySettings(settings);
+            IReadOnlyList<GameExecutableEntry> currentExecutables =
+                await coreBridgeService.GetGameExecutablesAsync(project.ConfigPath);
+            ApplySettings(settings, currentExecutables);
             StatusText = "Пути загружены. Изменения применяются только к этой сборке.";
         }
         catch (Exception exception)
         {
-            ApplySettings(project.Paths);
+            ApplySettings(project.Paths, project.Executables);
             ErrorText = $"Не удалось загрузить пути: {exception.Message}";
             StatusText = "Показаны текущие локальные значения.";
         }
@@ -150,14 +186,30 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
     {
         try
         {
+            if (!TryValidateGameExecutable(out string validationMessage))
+            {
+                ErrorText = validationMessage;
+                StatusText = "Выберите исполняемый файл игры.";
+                return false;
+            }
+
             IsBusy = true;
             ErrorText = string.Empty;
             StatusText = "Сохраняю пути сборки...";
             BuildPathSettings saved = await coreBridgeService.SaveBuildPathSettingsAsync(
                 project.ConfigPath,
                 CurrentSettings());
-            SavedSettings = saved;
-            ApplySettings(saved);
+            IReadOnlyList<GameExecutableEntry> savedExecutables =
+                await coreBridgeService.SaveGameExecutablesAsync(
+                    project.ConfigPath,
+                    BuildExecutableList(GameExecutablePath, saved.GameDirectory));
+
+            SavedResult = new BuildSettingsResult
+            {
+                Paths = saved,
+                Executables = savedExecutables
+            };
+            ApplySettings(saved, savedExecutables);
             StatusText = "Пути сборки сохранены.";
             return true;
         }
@@ -175,9 +227,15 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
 
     private BuildPathSettings CurrentSettings()
     {
+        string effectiveGameDirectory = GameDirectory;
+        if (TryGameDirectoryFromExecutable(GameExecutablePath, out string executableDirectory))
+        {
+            effectiveGameDirectory = executableDirectory;
+        }
+
         return new BuildPathSettings
         {
-            GameDirectory = GameDirectory,
+            GameDirectory = effectiveGameDirectory,
             ModsDirectory = ModsDirectory,
             ProfilesDirectory = ProfilesDirectory,
             DownloadsDirectory = DownloadsDirectory,
@@ -185,15 +243,177 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
         };
     }
 
-    private void ApplySettings(BuildPathSettings settings)
+    private void ApplySettings(
+        BuildPathSettings settings,
+        IReadOnlyList<GameExecutableEntry> currentExecutables)
     {
         BuildPathSettings copy = settings.Clone();
         copy.ApplyFallbacks(project.ProjectDirectory, project.GamePath);
+        executables = currentExecutables.Select(executable => executable.Clone()).ToList();
         GameDirectory = copy.GameDirectory;
+        GameExecutablePath = ResolveGameExecutablePath(executables, copy.GameDirectory);
         ModsDirectory = copy.ModsDirectory;
         ProfilesDirectory = copy.ProfilesDirectory;
         DownloadsDirectory = copy.DownloadsDirectory;
         OverwriteDirectory = copy.OverwriteDirectory;
+    }
+
+    private void BrowseGameExecutable()
+    {
+        string selectedRoot = File.Exists(GameExecutablePath)
+            ? GameExecutablePath
+            : Directory.Exists(GameDirectory)
+                ? GameDirectory
+                : project.ProjectDirectory;
+        string? selected = executablePickerService.PickExecutable("Выберите .exe игры", selectedRoot);
+        if (!string.IsNullOrWhiteSpace(selected))
+        {
+            GameExecutablePath = selected;
+        }
+    }
+
+    private bool TryValidateGameExecutable(out string message)
+    {
+        if (string.IsNullOrWhiteSpace(GameExecutablePath))
+        {
+            message = "Укажите .exe игры.";
+            return false;
+        }
+
+        if (!string.Equals(Path.GetExtension(GameExecutablePath), ".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            message = "Путь игры должен вести к .exe файлу.";
+            return false;
+        }
+
+        if (!File.Exists(GameExecutablePath))
+        {
+            message = "Выбранный .exe игры не найден.";
+            return false;
+        }
+
+        message = string.Empty;
+        return true;
+    }
+
+    private List<GameExecutableEntry> BuildExecutableList(string executablePath, string gameDirectory)
+    {
+        List<GameExecutableEntry> updated = executables.Select(executable => executable.Clone()).ToList();
+        string normalizedExecutablePath = Path.GetFullPath(executablePath);
+        string storedExecutablePath = ToStoredExecutablePath(normalizedExecutablePath, gameDirectory);
+        int index = updated.FindIndex(executable => IsPrimaryGameExecutable(executable, gameDirectory));
+        if (index < 0)
+        {
+            updated.Insert(0, new GameExecutableEntry());
+            index = 0;
+        }
+
+        GameExecutableEntry primary = updated[index];
+        primary.Id = string.IsNullOrWhiteSpace(primary.Id) ? "game" : primary.Id;
+        primary.DisplayName = DisplayNameForExecutable(normalizedExecutablePath);
+        primary.ExecutablePath = storedExecutablePath;
+        primary.WorkingDirectory = string.Empty;
+        primary.IconPath = string.Empty;
+        return updated;
+    }
+
+    private string ResolveGameExecutablePath(
+        IReadOnlyList<GameExecutableEntry> currentExecutables,
+        string currentGameDirectory)
+    {
+        GameExecutableEntry? primary = currentExecutables.FirstOrDefault(
+            executable => IsPrimaryGameExecutable(executable, currentGameDirectory));
+        primary ??= currentExecutables.FirstOrDefault(
+            executable => string.Equals(
+                Path.GetExtension(executable.ExecutablePath),
+                ".exe",
+                StringComparison.OrdinalIgnoreCase));
+
+        if (primary is not null)
+        {
+            return ResolveExecutablePath(primary.ExecutablePath, currentGameDirectory);
+        }
+
+        foreach (string executableName in PrimaryGameExecutableNames)
+        {
+            string candidate = Path.Combine(currentGameDirectory, executableName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private bool IsPrimaryGameExecutable(GameExecutableEntry executable, string currentGameDirectory)
+    {
+        string resolvedPath = ResolveExecutablePath(executable.ExecutablePath, currentGameDirectory);
+        string fileName = Path.GetFileName(resolvedPath);
+        return PrimaryGameExecutableNames.Any(
+            name => string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase)) ||
+            string.Equals(executable.Id, "game", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string ResolveExecutablePath(string executablePath, string currentGameDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            return string.Empty;
+        }
+
+        if (Path.IsPathRooted(executablePath))
+        {
+            return Path.GetFullPath(executablePath);
+        }
+
+        string gameCandidate = Path.Combine(currentGameDirectory, executablePath);
+        if (File.Exists(gameCandidate))
+        {
+            return Path.GetFullPath(gameCandidate);
+        }
+
+        string projectCandidate = Path.Combine(project.ProjectDirectory, executablePath);
+        if (File.Exists(projectCandidate))
+        {
+            return Path.GetFullPath(projectCandidate);
+        }
+
+        return gameCandidate;
+    }
+
+    private static bool TryGameDirectoryFromExecutable(string executablePath, out string directory)
+    {
+        directory = string.Empty;
+        if (!string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        directory = Path.GetDirectoryName(executablePath) ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(directory);
+    }
+
+    private static string ToStoredExecutablePath(string executablePath, string gameDirectory)
+    {
+        string normalizedGameDirectory = Path.GetFullPath(gameDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string normalizedExecutableDirectory = Path.GetDirectoryName(executablePath) ?? string.Empty;
+        normalizedExecutableDirectory = Path.GetFullPath(normalizedExecutableDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return string.Equals(normalizedExecutableDirectory, normalizedGameDirectory, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFileName(executablePath)
+            : executablePath;
+    }
+
+    private static string DisplayNameForExecutable(string executablePath)
+    {
+        string fileName = Path.GetFileName(executablePath);
+        return PrimaryGameExecutableNames.Any(
+            name => string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase))
+            ? "Skyrim Special Edition"
+            : Path.GetFileNameWithoutExtension(executablePath);
     }
 
     private void BrowsePath(string title, string currentPath, Action<string> apply)
@@ -208,7 +428,7 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
 
     private void RaiseCommandStateChanged()
     {
-        (BrowseGameDirectoryCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (BrowseGameExecutableCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (BrowseModsDirectoryCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (BrowseProfilesDirectoryCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (BrowseDownloadsDirectoryCommand as RelayCommand)?.RaiseCanExecuteChanged();

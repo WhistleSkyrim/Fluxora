@@ -50,6 +50,17 @@ The WPF project lives in `frontend`.
 
 ## Build
 
+The recommended build entry point creates both distributable folders:
+
+```powershell
+./Build.ps1 -Configuration Release -Runtime win-x64
+```
+
+The script creates:
+
+- `output/` - portable Fluxora build. By default the C#/.NET runtime is published as a single `FluxoraModding.exe`, with `FluxoraCore.dll` and `FluxoraVfs.dll` kept beside it for the native bridge and virtual file system hook. Use `-LooseFiles` if you need the old expanded .NET publish layout for debugging.
+- `output-installer/` - `FluxoraSetup.exe`, a branded installer that embeds the portable build, asks for language, privacy policy and terms acceptance, lets the user choose the installation folder, and unpacks Fluxora through the native C++ installer core.
+
 ### Backend
 
 ```powershell

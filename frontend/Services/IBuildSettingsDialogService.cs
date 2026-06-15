@@ -4,5 +4,5 @@ namespace Fluxora.App.Services;
 
 public interface IBuildSettingsDialogService
 {
-    BuildPathSettings? EditBuildPaths(ModProject project);
+    BuildSettingsResult? EditBuildPaths(ModProject project);
 }

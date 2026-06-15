@@ -2590,7 +2590,7 @@ namespace fluxora
                 return true;
             }
 
-            throw std::runtime_error("Failed to extract archive. Install 7-Zip or WinRAR, or place 7z.exe next to Fluxora.App.exe.");
+            throw std::runtime_error("Failed to extract archive. Install 7-Zip or WinRAR, or place 7z.exe next to FluxoraModding.exe.");
         }
 
         std::wstring fetchNexusModName(

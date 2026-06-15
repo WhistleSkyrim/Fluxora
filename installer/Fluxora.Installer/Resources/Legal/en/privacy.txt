@@ -1,0 +1,68 @@
+Fluxora Privacy Policy
+Last updated: 15 June 2026
+
+1. Controller
+Fluxora is provided as part of the ModdingFlow ecosystem. The controller for data processing is ModdingFlow, Germany, unless another legal notice is supplied with the official distribution. Use the official ModdingFlow contact channel or legal notice for privacy requests.
+
+2. Scope
+This policy covers the Fluxora installer, the Fluxora desktop launcher and the native C++ core included with Fluxora. It does not cover third-party services, game publishers, mod hosting platforms, Nexus Mods, Microsoft, or websites opened by the user.
+
+3. Summary
+Fluxora is designed as a local desktop application. The installer does not create an online account and does not send telemetry. Fluxora stores application files, settings, project metadata and logs on your device. Online communication happens only when you use features that require it, for example connecting Nexus Mods, opening a website, registering nxm links, checking mod data, or downloading files selected by you.
+
+4. Data processed locally
+Fluxora may store or process the following data on your device:
+
+- Installation data: selected installation folder, installed files, optional desktop shortcut path and temporary installer payload.
+- Settings: language, app configuration, build configuration folder and other preferences.
+- Project data: project names, game paths, mod folders, profile files, plugin order, download records, imported Mod Organizer data, executable paths and related metadata.
+- Logs: timestamps, operation status, error messages, selected paths, file names involved in an operation, process or thread identifiers and diagnostic details. Logs may indirectly contain your Windows user name if it is part of a file path.
+- Nexus Mods connection data, if you connect it: account display name, user id, token type, expiry date and access or refresh tokens protected with Windows data protection APIs where available.
+- Local protocol data: nxm links passed to Fluxora when you choose Fluxora as handler.
+
+Fluxora does not intentionally collect special categories of personal data, payment data, advertising identifiers, address books, browser history, microphone data, camera data or location data.
+
+5. Purposes and legal bases
+The legal bases follow Article 6 GDPR:
+
+- Installation and running Fluxora: Article 6(1)(b) GDPR, performance of the software use relationship, and Article 6(1)(f) GDPR, legitimate interest in providing a working desktop application.
+- Local settings and project data: Article 6(1)(b) GDPR, because these records are necessary for requested app functions.
+- Logs and diagnostics: Article 6(1)(f) GDPR, legitimate interest in security, troubleshooting, fraud prevention, support and software stability.
+- Optional Nexus Mods connection or other optional online actions: Article 6(1)(b) GDPR for requested functions and, where the action depends on your explicit choice, Article 6(1)(a) GDPR consent. You can disconnect Nexus Mods in the app.
+- Legal compliance, if applicable: Article 6(1)(c) GDPR.
+
+6. Storage locations
+Fluxora stores data locally, typically in these locations:
+
+- Installed application: the folder selected during installation.
+- Logs: a logs folder next to the executable where writable, and/or %APPDATA%\Fluxora\logs.
+- Settings: %APPDATA%\Fluxora\settings.ini and %APPDATA%\Fluxora\settings.json.
+- Project files: folders selected by you when creating or importing projects.
+- Temporary installer payload: the system temporary folder during installation only.
+
+7. Retention
+Fluxora keeps local data until you delete it, uninstall Fluxora, reset the app, disconnect an account, or delete the relevant project. The installer temporary payload is deleted after installation when possible. Logs are written as dated local files and are not automatically uploaded. Current builds do not enforce automatic log deletion, so logs remain until deleted by you or by your system cleanup tools.
+
+8. Recipients and transfers
+Fluxora does not sell personal data and does not send logs or telemetry to ModdingFlow automatically. Data may be sent to third parties only when you initiate a feature that requires it, for example:
+
+- Nexus Mods OAuth and API endpoints when you connect or use Nexus Mods features.
+- A download URL or mod hosting service when you download a file.
+- Your browser or operating system when Fluxora opens a link or registers local protocol handling.
+
+Those third parties process data under their own terms and privacy policies. Fluxora itself does not intentionally transfer data outside your device unless you use such optional online features or manually send logs for support.
+
+9. Security
+Fluxora uses local file permissions provided by Windows and protects Nexus Mods OAuth tokens with Windows data protection APIs where available. No security method can be guaranteed to be perfect. You should keep your Windows account, installation folder and backups protected.
+
+10. Your GDPR rights
+Subject to legal requirements, you may have the right to access, rectification, erasure, restriction of processing, data portability, objection and withdrawal of consent. Because Fluxora stores most data locally on your device, you can usually exercise these rights directly by deleting logs, settings, projects or the installation folder. For controller-side requests, use the official ModdingFlow privacy contact channel.
+
+11. Complaint
+You have the right to lodge a complaint with a competent data protection supervisory authority, in particular in the EU member state of your habitual residence, place of work or place of the alleged infringement. In Germany this is generally the supervisory authority responsible for your federal state.
+
+12. Children
+Fluxora is not directed at children. If a child uses Fluxora, a parent or legal guardian is responsible for ensuring that use is lawful and appropriate.
+
+13. Changes
+This policy may be updated when Fluxora changes how it processes data, when new online features are added, or when legal requirements change. The version bundled with the installer is the version presented before installation.

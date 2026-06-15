@@ -44,6 +44,7 @@ namespace fluxora
         constexpr std::wstring_view buildManifestsFolderName = L"Builds";
         constexpr std::wstring_view manifestFileExtension = L".json";
         constexpr std::wstring_view invalidFolderCharacters = L"<>:\"/\\|?*";
+        constexpr std::wstring_view customExecutablesPrefix = L"customexecutables.";
         constexpr std::wstring_view modKind = L"mod";
         constexpr std::wstring_view separatorKind = L"separator";
 
@@ -146,6 +147,11 @@ namespace fluxora
             return equalsIgnoreCase(value.substr(value.size() - suffix.size()), suffix);
         }
 
+        bool startsWith(std::wstring_view value, std::wstring_view prefix)
+        {
+            return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+        }
+
         std::wstring stripQuotes(std::wstring value)
         {
             value = trim(std::move(value));
@@ -154,6 +160,35 @@ namespace fluxora
                  (value.front() == L'\'' && value.back() == L'\'')))
             {
                 return value.substr(1, value.size() - 2);
+            }
+
+            return value;
+        }
+
+        void replaceAll(std::wstring& value, std::wstring_view token, std::wstring_view replacement)
+        {
+            if (token.empty())
+            {
+                return;
+            }
+
+            std::size_t position = 0;
+            while ((position = value.find(token, position)) != std::wstring::npos)
+            {
+                value.replace(position, token.size(), replacement);
+                position += replacement.size();
+            }
+        }
+
+        std::wstring decodeQtIniValue(std::wstring value)
+        {
+            value = stripQuotes(std::move(value));
+            if (value.size() >= 12 &&
+                equalsIgnoreCase(value.substr(0, 11), L"@ByteArray(") &&
+                value.back() == L')')
+            {
+                value = value.substr(11, value.size() - 12);
+                replaceAll(value, L"\\\\", L"\\");
             }
 
             return value;
@@ -1180,6 +1215,12 @@ namespace fluxora
             return std::filesystem::exists(path, error) && std::filesystem::is_regular_file(path, error);
         }
 
+        bool isDirectory(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_directory(path, error);
+        }
+
         bool hasProfileMarker(const std::filesystem::path& profileDirectory)
         {
             return isRegularFile(profileDirectory / L"modlist.txt") ||
@@ -1308,6 +1349,262 @@ namespace fluxora
             return total;
         }
 
+        bool hasExecutableExtension(const std::filesystem::path& path)
+        {
+            return equalsIgnoreCase(path.extension().wstring(), L".exe");
+        }
+
+        bool isKnownGameExecutableName(std::wstring_view fileName)
+        {
+            static constexpr std::array<std::wstring_view, 10> knownGameExecutables{
+                L"SkyrimSE.exe",
+                L"Skyrim SE.exe",
+                L"SkyrimSELauncher.exe",
+                L"SkyrimVR.exe",
+                L"SkyrimVRLauncher.exe",
+                L"TESV.exe",
+                L"SkyrimLauncher.exe",
+                L"Fallout4.exe",
+                L"Fallout4Launcher.exe",
+                L"Starfield.exe"
+            };
+
+            for (std::wstring_view executable : knownGameExecutables)
+            {
+                if (equalsIgnoreCase(fileName, executable))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool isLikelyGameDirectory(const std::filesystem::path& path)
+        {
+            if (path.empty() || !isDirectory(path))
+            {
+                return false;
+            }
+
+            static constexpr std::array<std::wstring_view, 10> knownGameExecutables{
+                L"SkyrimSE.exe",
+                L"Skyrim SE.exe",
+                L"SkyrimSELauncher.exe",
+                L"SkyrimVR.exe",
+                L"SkyrimVRLauncher.exe",
+                L"TESV.exe",
+                L"SkyrimLauncher.exe",
+                L"Fallout4.exe",
+                L"Fallout4Launcher.exe",
+                L"Starfield.exe"
+            };
+
+            for (std::wstring_view executable : knownGameExecutables)
+            {
+                if (isRegularFile(path / std::filesystem::path(executable)))
+                {
+                    return true;
+                }
+            }
+
+            return isDirectory(path / L"Data");
+        }
+
+        std::optional<std::filesystem::path> likelyGameDirectoryFromCandidate(
+            const std::filesystem::path& candidate)
+        {
+            if (candidate.empty())
+            {
+                return std::nullopt;
+            }
+
+            const std::filesystem::path resolved = canonicalOrAbsolute(candidate);
+            if (isRegularFile(resolved))
+            {
+                const std::filesystem::path parent = resolved.parent_path();
+                if (hasExecutableExtension(resolved) &&
+                    (isKnownGameExecutableName(resolved.filename().wstring()) || isLikelyGameDirectory(parent)))
+                {
+                    return canonicalOrAbsolute(parent);
+                }
+
+                return std::nullopt;
+            }
+
+            if (isLikelyGameDirectory(resolved))
+            {
+                return canonicalOrAbsolute(resolved);
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<std::filesystem::path> existingGameDirectoryFromCandidate(
+            const std::filesystem::path& candidate)
+        {
+            if (candidate.empty())
+            {
+                return std::nullopt;
+            }
+
+            const std::filesystem::path resolved = canonicalOrAbsolute(candidate);
+            if (isRegularFile(resolved) && hasExecutableExtension(resolved))
+            {
+                return canonicalOrAbsolute(resolved.parent_path());
+            }
+
+            if (isDirectory(resolved))
+            {
+                return resolved;
+            }
+
+            return std::nullopt;
+        }
+
+        std::vector<std::filesystem::path> resolveGamePathCandidates(
+            std::wstring configured,
+            const std::filesystem::path& sourceDirectory)
+        {
+            configured = decodeQtIniValue(std::move(configured));
+            if (configured.empty())
+            {
+                return {};
+            }
+
+            replaceAllIgnoreCase(configured, L"%BASE_DIR%", sourceDirectory.wstring());
+            replaceAllIgnoreCase(configured, L"${BASE_DIR}", sourceDirectory.wstring());
+            replaceAllIgnoreCase(configured, L"{BASE_DIR}", sourceDirectory.wstring());
+            configured = expandEnvironmentVariables(std::move(configured));
+
+            std::filesystem::path path(configured);
+            std::vector<std::filesystem::path> candidates;
+            if (path.is_absolute())
+            {
+                candidates.push_back(path);
+            }
+            else
+            {
+                candidates.push_back(sourceDirectory / path);
+                candidates.push_back(path);
+            }
+
+            return candidates;
+        }
+
+        std::optional<std::filesystem::path> likelyGameDirectoryFromText(
+            const std::wstring& value,
+            const std::filesystem::path& sourceDirectory)
+        {
+            for (const std::filesystem::path& candidate : resolveGamePathCandidates(value, sourceDirectory))
+            {
+                if (const auto gameDirectory = likelyGameDirectoryFromCandidate(candidate))
+                {
+                    return gameDirectory;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<std::filesystem::path> existingGameDirectoryFromText(
+            const std::wstring& value,
+            const std::filesystem::path& sourceDirectory)
+        {
+            for (const std::filesystem::path& candidate : resolveGamePathCandidates(value, sourceDirectory))
+            {
+                const auto gameDirectory = existingGameDirectoryFromCandidate(candidate);
+                if (gameDirectory.has_value() && !areSamePath(gameDirectory.value(), sourceDirectory))
+                {
+                    return gameDirectory;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<std::filesystem::path> gameDirectoryFromCustomExecutables(
+            const std::map<std::wstring, std::wstring>& organizerIni,
+            const std::filesystem::path& sourceDirectory)
+        {
+            for (std::wstring_view fieldSuffix : {L"\\binary", L"\\workingdirectory"})
+            {
+                for (const auto& [key, value] : organizerIni)
+                {
+                    if (!startsWith(key, customExecutablesPrefix) ||
+                        !endsWithIgnoreCase(key, fieldSuffix))
+                    {
+                        continue;
+                    }
+
+                    if (const auto gameDirectory = likelyGameDirectoryFromText(value, sourceDirectory))
+                    {
+                        return gameDirectory;
+                    }
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<std::filesystem::path> localGameDirectoryFromSource(
+            const std::filesystem::path& sourceDirectory)
+        {
+            static constexpr std::array<std::wstring_view, 9> preferredFolderNames{
+                L"stock game",
+                L"Stock Game",
+                L"stock_game",
+                L"game",
+                L"Game",
+                L"Skyrim Special Edition",
+                L"SkyrimSE",
+                L"Skyrim SE",
+                L"Skyrim"
+            };
+
+            for (std::wstring_view folderName : preferredFolderNames)
+            {
+                if (const auto gameDirectory =
+                    likelyGameDirectoryFromCandidate(sourceDirectory / std::filesystem::path(folderName)))
+                {
+                    return gameDirectory;
+                }
+            }
+
+            std::error_code error;
+            for (const std::filesystem::directory_entry& entry :
+                std::filesystem::directory_iterator(sourceDirectory, error))
+            {
+                if (error)
+                {
+                    break;
+                }
+
+                if (!entry.is_directory(error))
+                {
+                    continue;
+                }
+
+                const std::wstring name = toLower(entry.path().filename().wstring());
+                if (name == L"mods" ||
+                    name == L"profiles" ||
+                    name == L"downloads" ||
+                    name == L"overwrite" ||
+                    name == L"webcache" ||
+                    name == L"logs")
+                {
+                    continue;
+                }
+
+                if (const auto gameDirectory = likelyGameDirectoryFromCandidate(entry.path()))
+                {
+                    return gameDirectory;
+                }
+            }
+
+            return likelyGameDirectoryFromCandidate(sourceDirectory);
+        }
+
         BuildTemplate chooseTemplate(
             const TemplateService& templates,
             const std::map<std::wstring, std::wstring>& organizerIni,
@@ -1352,25 +1649,37 @@ namespace fluxora
             const ProjectOpenResult* existingProject,
             const std::filesystem::path& sourceDirectory)
         {
-            std::wstring gamePath = iniValue(
+            const std::filesystem::path source = canonicalOrAbsolute(sourceDirectory);
+            const std::wstring gamePath = iniValue(
                 organizerIni,
                 {L"gamePath", L"General.gamePath", L"managed_game", L"General.managed_game"});
 
-            if (!gamePath.empty())
+            if (const auto configured = likelyGameDirectoryFromText(gamePath, source))
             {
-                std::filesystem::path path(gamePath);
-                if (std::filesystem::exists(path))
-                {
-                    return std::filesystem::absolute(path);
-                }
+                return configured.value();
+            }
+
+            if (const auto configuredExisting = existingGameDirectoryFromText(gamePath, source))
+            {
+                return configuredExisting.value();
+            }
+
+            if (const auto fromExecutable = gameDirectoryFromCustomExecutables(organizerIni, source))
+            {
+                return fromExecutable.value();
+            }
+
+            if (const auto localGameDirectory = localGameDirectoryFromSource(source))
+            {
+                return localGameDirectory.value();
             }
 
             if (existingProject != nullptr && !existingProject->project.gamePath.empty())
             {
-                return existingProject->project.gamePath;
+                return canonicalOrAbsolute(existingProject->project.gamePath);
             }
 
-            return std::filesystem::absolute(sourceDirectory);
+            return source;
         }
 
         ModOrganizerImportAnalysis buildAnalysis(

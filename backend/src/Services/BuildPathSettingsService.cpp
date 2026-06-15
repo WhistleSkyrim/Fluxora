@@ -5,9 +5,11 @@
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cwctype>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -244,6 +246,188 @@ namespace fluxora
             const wchar_t separator = candidateText[rootText.size()];
             return (separator == L'\\' || separator == L'/') &&
                 candidateText.compare(0, rootText.size(), rootText) == 0;
+        }
+
+        bool pathExists(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error);
+        }
+
+        bool isDirectory(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_directory(path, error);
+        }
+
+        bool isRegularFile(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_regular_file(path, error);
+        }
+
+        bool hasExecutableExtension(const std::filesystem::path& path)
+        {
+            std::wstring extension = path.extension().wstring();
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t character)
+            {
+                return static_cast<wchar_t>(std::towlower(character));
+            });
+            return extension == L".exe";
+        }
+
+        bool hasImmediateExecutable(const std::filesystem::path& directory)
+        {
+            std::error_code error;
+            for (const std::filesystem::directory_entry& entry :
+                std::filesystem::directory_iterator(directory, error))
+            {
+                if (error)
+                {
+                    break;
+                }
+
+                if (entry.is_regular_file(error) && hasExecutableExtension(entry.path()))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool hasKnownGameExecutable(const std::filesystem::path& directory)
+        {
+            static constexpr std::array<std::wstring_view, 10> knownGameExecutables{
+                L"SkyrimSE.exe",
+                L"Skyrim SE.exe",
+                L"SkyrimSELauncher.exe",
+                L"SkyrimVR.exe",
+                L"SkyrimVRLauncher.exe",
+                L"TESV.exe",
+                L"SkyrimLauncher.exe",
+                L"Fallout4.exe",
+                L"Fallout4Launcher.exe",
+                L"Starfield.exe"
+            };
+
+            for (std::wstring_view executable : knownGameExecutables)
+            {
+                if (isRegularFile(directory / std::filesystem::path(executable)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool isKnownGameDirectory(const std::filesystem::path& directory)
+        {
+            return isDirectory(directory) &&
+                (hasKnownGameExecutable(directory) || isDirectory(directory / L"Data"));
+        }
+
+        bool looksLikeModOrganizerRoot(const std::filesystem::path& directory)
+        {
+            return isDirectory(directory) &&
+                (isRegularFile(directory / L"ModOrganizer.ini") ||
+                 (isDirectory(directory / L"mods") && isDirectory(directory / L"profiles")));
+        }
+
+        std::optional<std::filesystem::path> localGameDirectoryFromProject(
+            const std::filesystem::path& projectDirectory)
+        {
+            static constexpr std::array<std::wstring_view, 9> preferredFolderNames{
+                L"stock game",
+                L"Stock Game",
+                L"stock_game",
+                L"game",
+                L"Game",
+                L"Skyrim Special Edition",
+                L"SkyrimSE",
+                L"Skyrim SE",
+                L"Skyrim"
+            };
+
+            for (std::wstring_view folderName : preferredFolderNames)
+            {
+                const std::filesystem::path candidate =
+                    std::filesystem::absolute(projectDirectory / std::filesystem::path(folderName)).lexically_normal();
+                if (isKnownGameDirectory(candidate) || (isDirectory(candidate) && hasImmediateExecutable(candidate)))
+                {
+                    return candidate;
+                }
+            }
+
+            std::error_code error;
+            for (const std::filesystem::directory_entry& entry :
+                std::filesystem::directory_iterator(projectDirectory, error))
+            {
+                if (error)
+                {
+                    break;
+                }
+
+                if (!entry.is_directory(error))
+                {
+                    continue;
+                }
+
+                std::wstring name = entry.path().filename().wstring();
+                std::transform(name.begin(), name.end(), name.begin(), [](wchar_t character)
+                {
+                    return static_cast<wchar_t>(std::towlower(character));
+                });
+                if (name == L"mods" ||
+                    name == L"profiles" ||
+                    name == L"downloads" ||
+                    name == L"overwrite" ||
+                    name == L"webcache" ||
+                    name == L"logs")
+                {
+                    continue;
+                }
+
+                const std::filesystem::path candidate =
+                    std::filesystem::absolute(entry.path()).lexically_normal();
+                if (isKnownGameDirectory(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        BuildPathSettings repairTransferredGameDirectory(
+            const BuildPathSettings& settings,
+            const std::filesystem::path& projectDirectory)
+        {
+            if (projectDirectory.empty() || isKnownGameDirectory(settings.gameDirectory))
+            {
+                return settings;
+            }
+
+            const bool shouldRepair =
+                settings.gameDirectory.empty() ||
+                !pathExists(settings.gameDirectory) ||
+                looksLikeModOrganizerRoot(settings.gameDirectory) ||
+                isSameOrInsidePath(settings.gameDirectory, projectDirectory);
+            if (!shouldRepair)
+            {
+                return settings;
+            }
+
+            const auto localGameDirectory = localGameDirectoryFromProject(projectDirectory);
+            if (!localGameDirectory.has_value())
+            {
+                return settings;
+            }
+
+            BuildPathSettings repaired = settings;
+            repaired.gameDirectory = localGameDirectory.value();
+            return repaired;
         }
 
         std::wstring pathTextForStorage(
@@ -549,7 +733,8 @@ namespace fluxora
             settings = loadLocalSettings(projectDirectory, settings);
         }
 
-        return normalizeSettings(settings, defaults);
+        settings = normalizeSettings(settings, defaults);
+        return repairTransferredGameDirectory(settings, projectDirectory);
     }
 
     BuildPathSettings BuildPathSettingsService::saveForConfig(
@@ -601,7 +786,10 @@ namespace fluxora
         BuildPathSettings settings = loadLocalSettings(
             std::filesystem::absolute(projectDirectory).lexically_normal(),
             defaults);
-        return normalizeSettings(settings, defaults);
+        settings = normalizeSettings(settings, defaults);
+        return repairTransferredGameDirectory(
+            settings,
+            std::filesystem::absolute(projectDirectory).lexically_normal());
     }
 
     std::filesystem::path BuildPathSettingsService::modsDirectory(

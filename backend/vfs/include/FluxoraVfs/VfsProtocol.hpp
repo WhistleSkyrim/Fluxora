@@ -13,7 +13,7 @@
 //
 // Nothing is ever copied into the game folder: the manager only ever writes this
 // tiny descriptor; the mod files stay in the instance "mods" folder and are made
-// to *appear* inside the game data directory by the hooks at runtime.
+// to *appear* inside the game/data directories by the hooks at runtime.
 
 namespace fluxora::vfs::protocol
 {
@@ -22,7 +22,7 @@ namespace fluxora::vfs::protocol
 
     // Current descriptor schema version. Bump when the JSON layout changes in a
     // way the injected DLL must be able to detect.
-    inline constexpr int schemaVersion = 1;
+    inline constexpr int schemaVersion = 2;
 
     // JSON field names of the descriptor document.
     namespace fields
@@ -49,5 +49,14 @@ namespace fluxora::vfs::protocol
         // every mod overrides the real game files. The writable overwrite overlay
         // sits above all of them.
         inline constexpr const wchar_t* mods = L"mods";
+
+        // Schema v2 supports multiple virtual mount points. Each mount object uses
+        // the same target/overwrite/mods fields above.
+        inline constexpr const wchar_t* mounts = L"mounts";
+
+        // Top-level folder names that should not be projected into this mount.
+        // Root Builder uses a top-level "root" folder for game-root files, so the
+        // data mount excludes it while a separate game-root mount projects it.
+        inline constexpr const wchar_t* excludedRootNames = L"excludedRootNames";
     }
 }

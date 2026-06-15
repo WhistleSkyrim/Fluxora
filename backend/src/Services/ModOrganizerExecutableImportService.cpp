@@ -345,6 +345,39 @@ namespace fluxora
             return isDirectory(gamePath / L"Data");
         }
 
+        bool isScriptExtenderLoaderName(
+            const ModOrganizerExecutableImportContext& context,
+            const std::filesystem::path& path)
+        {
+            const std::wstring fileName = path.filename().wstring();
+            if (fileName.empty())
+            {
+                return false;
+            }
+
+            std::vector<std::wstring> candidateNames;
+            if (!context.scriptExtenderLoaderExecutable.empty())
+            {
+                candidateNames.push_back(context.scriptExtenderLoaderExecutable);
+            }
+            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            {
+                candidateNames.push_back(L"skse64_loader.exe");
+                candidateNames.push_back(L"sksevr_loader.exe");
+                candidateNames.push_back(L"skse_loader.exe");
+            }
+
+            for (const std::wstring& candidateName : candidateNames)
+            {
+                if (equalsIgnoreCase(fileName, candidateName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         std::wstring slashNormalized(std::filesystem::path path)
         {
             std::wstring text = path.lexically_normal().wstring();
@@ -480,7 +513,12 @@ namespace fluxora
                     continue;
                 }
 
-                const std::wstring field = toLower(rest.substr(separator + 1));
+                std::wstring field = rest.substr(separator + 1);
+                while (!field.empty() && field.front() == L'\\')
+                {
+                    field.erase(field.begin());
+                }
+                field = toLower(std::move(field));
                 grouped[index][field] = decodeQtIniValue(value);
             }
 
@@ -731,6 +769,84 @@ namespace fluxora
             return {};
         }
 
+        std::optional<std::wstring> defaultGameExecutableName(
+            const ModOrganizerExecutableImportContext& context)
+        {
+            std::vector<std::wstring> candidateNames;
+            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            {
+                candidateNames.push_back(L"SkyrimSE.exe");
+                candidateNames.push_back(L"Skyrim SE.exe");
+                candidateNames.push_back(L"SkyrimSELauncher.exe");
+            }
+            else if (containsIgnoreCase(context.templateId, L"skyrim"))
+            {
+                candidateNames.push_back(L"SkyrimSE.exe");
+                candidateNames.push_back(L"Skyrim SE.exe");
+                candidateNames.push_back(L"TESV.exe");
+            }
+
+            candidateNames.push_back(L"SkyrimSE.exe");
+            candidateNames.push_back(L"Skyrim SE.exe");
+            candidateNames.push_back(L"Fallout4.exe");
+            candidateNames.push_back(L"Starfield.exe");
+
+            std::set<std::wstring> seen;
+            for (const std::wstring& candidateName : candidateNames)
+            {
+                if (!seen.insert(toLower(candidateName)).second)
+                {
+                    continue;
+                }
+
+                if (isRegularFile(context.gamePath / std::filesystem::path(candidateName)))
+                {
+                    return candidateName;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<GameExecutable> defaultGameExecutable(
+            const ModOrganizerExecutableImportContext& context)
+        {
+            const std::optional<std::wstring> executableName = defaultGameExecutableName(context);
+            if (!executableName.has_value())
+            {
+                return std::nullopt;
+            }
+
+            std::wstring displayName = fileNameWithoutExtension(executableName.value());
+            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            {
+                displayName = L"Skyrim Special Edition";
+            }
+
+            return GameExecutable{
+                L"game",
+                displayName,
+                executableName.value(),
+                {},
+                {}
+            };
+        }
+
+        bool hasExecutablePath(
+            const std::vector<GameExecutable>& executables,
+            std::wstring_view executablePath)
+        {
+            for (const GameExecutable& executable : executables)
+            {
+                if (equalsIgnoreCase(executable.executablePath, executablePath))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         bool isPathUnderAnyAlreadyCopiedRoot(
             const std::filesystem::path& path,
             const std::vector<PathMapping>& mappings)
@@ -811,6 +927,18 @@ namespace fluxora
 
             if (!resolvedPath.empty())
             {
+                if (isExecutableFile && isScriptExtenderLoaderName(context, resolvedPath))
+                {
+                    const std::filesystem::path gameRootLoader =
+                        context.gamePath / resolvedPath.filename();
+                    if (isRegularFile(gameRootLoader))
+                    {
+                        mapped.sourcePath = canonicalOrAbsolute(gameRootLoader);
+                        mapped.text = slashNormalized(resolvedPath.filename());
+                        return mapped;
+                    }
+                }
+
                 for (const PathMapping& mapping : mappings)
                 {
                     std::filesystem::path relative;
@@ -1089,6 +1217,13 @@ namespace fluxora
         for (GameExecutable& executable : executables)
         {
             executable.arguments = remapArguments(std::move(executable.arguments), mappings, copyRoots);
+        }
+
+        if (const std::optional<GameExecutable> defaultExecutable = defaultGameExecutable(context);
+            defaultExecutable.has_value() &&
+            !hasExecutablePath(executables, defaultExecutable->executablePath))
+        {
+            executables.insert(executables.begin(), defaultExecutable.value());
         }
 
         ModOrganizerExecutableImportPlan plan;

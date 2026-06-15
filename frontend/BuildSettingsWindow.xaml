@@ -503,14 +503,14 @@
                                         <ColumnDefinition Width="10" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Путь игры"
+                                    <TextBlock Text="EXE игры"
                                                Style="{StaticResource PathLabelStyle}" />
                                     <TextBox Grid.Column="1"
                                              Style="{StaticResource PathTextBoxStyle}"
-                                             Text="{Binding GameDirectory, UpdateSourceTrigger=PropertyChanged}" />
+                                             Text="{Binding GameExecutablePath, UpdateSourceTrigger=PropertyChanged}" />
                                     <Button Grid.Column="3"
                                             Style="{StaticResource SecondaryButtonStyle}"
-                                            Command="{Binding BrowseGameDirectoryCommand}"
+                                            Command="{Binding BrowseGameExecutableCommand}"
                                             MinWidth="104"
                                             Content="Выбрать" />
                                 </Grid>

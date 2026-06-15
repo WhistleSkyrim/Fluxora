@@ -14,6 +14,10 @@ TestResults/
 # CMake / C++
 build/
 out/
+Output/
+output/
+output-installer/
+installer/Fluxora.Installer/Resources/Payload/
 CMakeUserPresets.json
 *.obj
 *.pdb

@@ -7,11 +7,14 @@
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cwctype>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -63,6 +66,43 @@ namespace fluxora
 
             const auto last = value.find_last_not_of(L" .");
             return value.substr(first, last - first + 1);
+        }
+
+        std::wstring toLower(std::wstring value)
+        {
+            std::transform(value.begin(), value.end(), value.begin(), [](wchar_t character)
+            {
+                return static_cast<wchar_t>(std::towlower(character));
+            });
+            return value;
+        }
+
+        bool equalsIgnoreCase(std::wstring_view left, std::wstring_view right)
+        {
+            return toLower(std::wstring(left)) == toLower(std::wstring(right));
+        }
+
+        bool isDirectory(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_directory(path, error);
+        }
+
+        bool isRegularFile(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            return std::filesystem::exists(path, error) && std::filesystem::is_regular_file(path, error);
+        }
+
+        bool hasExecutableExtension(const std::filesystem::path& path)
+        {
+            return equalsIgnoreCase(path.extension().wstring(), L".exe");
+        }
+
+        std::wstring fileNameWithoutExtension(const std::filesystem::path& path)
+        {
+            const std::wstring stem = path.stem().wstring();
+            return stem.empty() ? path.filename().wstring() : stem;
         }
 
         std::wstring sanitizeFolderName(std::wstring_view name)
@@ -558,19 +598,29 @@ namespace fluxora
             }
         }
 
-        struct DeleteTarget
+        struct DeleteFileTask
         {
             std::filesystem::path path;
-            bool isDirectory{false};
             std::uintmax_t bytes{0};
-            std::uintmax_t entries{0};
         };
 
         struct DeletePlan
         {
-            std::vector<DeleteTarget> targets;
+            std::vector<DeleteFileTask> files;
+            std::vector<std::filesystem::path> directories;
             std::uintmax_t totalBytes{0};
             std::uintmax_t totalEntries{1};
+        };
+
+        struct DeleteProgressState
+        {
+            std::atomic<std::uintmax_t> deletedBytes{0};
+            std::atomic<std::uintmax_t> deletedEntries{0};
+            std::mutex mutex;
+            std::mutex callbackMutex;
+            std::chrono::steady_clock::time_point lastReport{};
+            std::uintmax_t lastReportedBytes{0};
+            std::uintmax_t lastReportedEntries{0};
         };
 
         bool isSameOrInsidePath(
@@ -673,54 +723,58 @@ namespace fluxora
 
         void clearReadOnlyAttribute(const std::filesystem::path& path);
 
-        std::filesystem::path deleteUnitForRelativePath(
-            const std::filesystem::path& relative,
-            bool isDirectory)
+        std::size_t pathDepth(const std::filesystem::path& path)
         {
-            auto iterator = relative.begin();
-            if (iterator == relative.end())
-            {
-                return {};
-            }
-
-            std::filesystem::path unit = *iterator;
-            ++iterator;
-            if (iterator == relative.end())
-            {
-                return isDirectory ? std::filesystem::path{} : unit;
-            }
-
-            unit /= *iterator;
-            return unit;
+            return static_cast<std::size_t>(std::distance(path.begin(), path.end()));
         }
 
-        DeleteTarget& findOrCreateDeleteTarget(
-            std::vector<DeleteTarget>& targets,
-            const std::filesystem::path& path)
+        void publishScanProgress(
+            const std::function<void(const ProjectDeleteProgress&)>& progress,
+            const std::filesystem::path& root,
+            const std::filesystem::path& path,
+            std::uintmax_t scannedEntries,
+            std::chrono::steady_clock::time_point& lastReport,
+            bool force)
         {
-            const auto existing = std::find_if(
-                targets.begin(),
-                targets.end(),
-                [&path](const DeleteTarget& candidate)
-                {
-                    return isSamePath(candidate.path, path);
-                });
-            if (existing != targets.end())
+            if (!progress)
             {
-                return *existing;
+                return;
             }
 
-            std::error_code statusError;
-            const std::filesystem::file_status status = std::filesystem::symlink_status(path, statusError);
-            targets.push_back(DeleteTarget{
-                path,
-                !statusError &&
-                    std::filesystem::is_directory(status) &&
-                    !std::filesystem::is_symlink(status),
+            const auto now = std::chrono::steady_clock::now();
+            if (!force &&
+                scannedEntries % 512 != 0 &&
+                now - lastReport < std::chrono::milliseconds(250))
+            {
+                return;
+            }
+
+            lastReport = now;
+            publishDeleteProgress(
+                progress,
+                L"scan",
+                L"Считаю файлы сборки",
+                relativeDisplayPath(root, path),
                 0,
-                0
+                0,
+                0,
+                scannedEntries,
+                0);
+        }
+
+        void sortDirectoriesDeepestFirst(std::vector<std::filesystem::path>& directories)
+        {
+            std::sort(directories.begin(), directories.end(), [](const auto& left, const auto& right)
+            {
+                const std::size_t leftDepth = pathDepth(left);
+                const std::size_t rightDepth = pathDepth(right);
+                if (leftDepth != rightDepth)
+                {
+                    return leftDepth > rightDepth;
+                }
+
+                return left.wstring().size() > right.wstring().size();
             });
-            return targets.back();
         }
 
         DeletePlan collectDeletePlan(
@@ -741,6 +795,8 @@ namespace fluxora
             clearReadOnlyAttribute(root);
 
             DeletePlan plan;
+            std::uintmax_t scannedEntries = 0;
+            auto lastScanReport = std::chrono::steady_clock::now();
             std::error_code error;
             const std::filesystem::path nativeRoot = nativeDeletePath(root);
             std::filesystem::recursive_directory_iterator iterator(
@@ -773,8 +829,8 @@ namespace fluxora
                 const bool isDirectory = std::filesystem::is_directory(status) &&
                     !std::filesystem::is_symlink(status);
                 const std::uintmax_t bytes = regularFileSize(nativePath, status);
-                plan.totalBytes += bytes;
                 ++plan.totalEntries;
+                ++scannedEntries;
 
                 const std::filesystem::path relative = std::filesystem::relative(nativePath, nativeRoot, error);
                 if (error)
@@ -784,19 +840,33 @@ namespace fluxora
                 }
 
                 const std::filesystem::path path = root / relative;
-                clearReadOnlyAttribute(path);
-
-                const std::filesystem::path unitRelative = deleteUnitForRelativePath(relative, isDirectory);
-                if (unitRelative.empty())
+                if (isDirectory)
                 {
-                    continue;
+                    plan.directories.push_back(path);
+                }
+                else
+                {
+                    plan.totalBytes += bytes;
+                    plan.files.push_back(DeleteFileTask{path, bytes});
                 }
 
-                DeleteTarget& target = findOrCreateDeleteTarget(plan.targets, root / unitRelative);
-                target.bytes += bytes;
-                ++target.entries;
+                publishScanProgress(
+                    progress,
+                    root,
+                    path,
+                    scannedEntries,
+                    lastScanReport,
+                    false);
             }
 
+            sortDirectoriesDeepestFirst(plan.directories);
+            publishScanProgress(
+                progress,
+                root,
+                root,
+                scannedEntries,
+                lastScanReport,
+                true);
             return plan;
         }
 
@@ -849,37 +919,203 @@ namespace fluxora
             }
         }
 
-        std::uintmax_t removeTreeWithRetry(const std::filesystem::path& path)
+        std::size_t deleteWorkerCount(std::size_t fileCount)
         {
-            constexpr int maxAttempts = 5;
-
-            for (int attempt = 0; attempt < maxAttempts; ++attempt)
+            if (fileCount == 0)
             {
-                clearReadOnlyAttribute(path);
-                const std::filesystem::path nativePath = nativeDeletePath(path);
-
-                std::error_code removeError;
-                const std::uintmax_t removed = std::filesystem::remove_all(nativePath, removeError);
-                std::error_code existsError;
-                if (!removeError && !std::filesystem::exists(nativePath, existsError))
-                {
-                    return removed;
-                }
-
-                if (attempt + 1 < maxAttempts)
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(120 + attempt * 80));
-                    continue;
-                }
-
-                const std::string reason = removeError
-                    ? removeError.message()
-                    : "path still exists";
-                throw std::runtime_error(
-                    "Failed to delete \"" + toUtf8(path.wstring()) + "\": " + reason);
+                return 0;
             }
 
-            return 0;
+            const unsigned int hardwareThreads = std::thread::hardware_concurrency();
+            const std::size_t detectedWorkers = hardwareThreads == 0 ? 4 : hardwareThreads;
+            const std::size_t workerLimit = (std::min<std::size_t>)(detectedWorkers, 4);
+            return (std::max<std::size_t>)(1, (std::min)(workerLimit, fileCount));
+        }
+
+        void publishDeleteStateProgress(
+            DeleteProgressState& state,
+            const std::function<void(const ProjectDeleteProgress&)>& progress,
+            const std::filesystem::path& root,
+            const std::filesystem::path& currentItem,
+            std::uintmax_t totalBytes,
+            std::uintmax_t totalEntries,
+            std::wstring_view currentStep,
+            bool force)
+        {
+            if (!progress)
+            {
+                return;
+            }
+
+            const std::uintmax_t deletedBytes = state.deletedBytes.load(std::memory_order_relaxed);
+            const std::uintmax_t deletedEntries = state.deletedEntries.load(std::memory_order_relaxed);
+            const auto now = std::chrono::steady_clock::now();
+            constexpr std::uintmax_t minByteInterval = 32ull * 1024ull * 1024ull;
+            constexpr std::uintmax_t minEntryInterval = 128;
+
+            ProjectDeleteProgress update;
+            std::unique_lock<std::mutex> callbackLock;
+            {
+                std::lock_guard lock(state.mutex);
+                const bool enoughBytes = deletedBytes - state.lastReportedBytes >= minByteInterval;
+                const bool enoughEntries = deletedEntries - state.lastReportedEntries >= minEntryInterval;
+                if (!force &&
+                    !enoughBytes &&
+                    !enoughEntries &&
+                    now - state.lastReport < std::chrono::milliseconds(150))
+                {
+                    return;
+                }
+
+                state.lastReportedBytes = deletedBytes;
+                state.lastReportedEntries = deletedEntries;
+                state.lastReport = now;
+                callbackLock = std::unique_lock<std::mutex>(state.callbackMutex);
+                update = ProjectDeleteProgress{
+                    L"delete",
+                    std::wstring(currentStep),
+                    relativeDisplayPath(root, currentItem),
+                    calculateDeletePercent(deletedBytes, totalBytes, deletedEntries, totalEntries),
+                    deletedBytes,
+                    totalBytes,
+                    deletedEntries,
+                    totalEntries
+                };
+            }
+
+            progress(update);
+        }
+
+        void recordDeletedEntry(
+            DeleteProgressState& state,
+            const std::function<void(const ProjectDeleteProgress&)>& progress,
+            const std::filesystem::path& root,
+            const std::filesystem::path& currentItem,
+            std::uintmax_t bytes,
+            std::uintmax_t totalBytes,
+            std::uintmax_t totalEntries,
+            std::wstring_view currentStep,
+            bool force = false)
+        {
+            if (bytes > 0)
+            {
+                state.deletedBytes.fetch_add(bytes, std::memory_order_relaxed);
+            }
+            state.deletedEntries.fetch_add(1, std::memory_order_relaxed);
+            publishDeleteStateProgress(
+                state,
+                progress,
+                root,
+                currentItem,
+                totalBytes,
+                totalEntries,
+                currentStep,
+                force);
+        }
+
+        void rememberDeleteException(
+            std::exception_ptr& firstError,
+            std::mutex& errorMutex,
+            std::atomic<bool>& shouldStop)
+        {
+            {
+                std::lock_guard lock(errorMutex);
+                if (!firstError)
+                {
+                    firstError = std::current_exception();
+                }
+            }
+            shouldStop.store(true, std::memory_order_relaxed);
+        }
+
+        void deleteFilesFromPlan(
+            const DeletePlan& plan,
+            DeleteProgressState& state,
+            const std::function<void(const ProjectDeleteProgress&)>& progress,
+            const std::filesystem::path& root,
+            std::uintmax_t totalBytes,
+            std::uintmax_t totalEntries)
+        {
+            const std::size_t workerCount = deleteWorkerCount(plan.files.size());
+            if (workerCount == 0)
+            {
+                return;
+            }
+
+            std::atomic<std::size_t> nextIndex{0};
+            std::atomic<bool> shouldStop{false};
+            std::exception_ptr firstError;
+            std::mutex errorMutex;
+
+            std::vector<std::thread> workers;
+            workers.reserve(workerCount);
+            for (std::size_t worker = 0; worker < workerCount; ++worker)
+            {
+                workers.emplace_back([&]()
+                {
+                    while (!shouldStop.load(std::memory_order_relaxed))
+                    {
+                        const std::size_t index = nextIndex.fetch_add(1, std::memory_order_relaxed);
+                        if (index >= plan.files.size())
+                        {
+                            break;
+                        }
+
+                        const DeleteFileTask& task = plan.files[index];
+                        try
+                        {
+                            removePathWithRetry(task.path);
+                            recordDeletedEntry(
+                                state,
+                                progress,
+                                root,
+                                task.path,
+                                task.bytes,
+                                totalBytes,
+                                totalEntries,
+                                L"Удаляю файлы сборки");
+                        }
+                        catch (...)
+                        {
+                            rememberDeleteException(firstError, errorMutex, shouldStop);
+                            break;
+                        }
+                    }
+                });
+            }
+
+            for (std::thread& worker : workers)
+            {
+                worker.join();
+            }
+
+            if (firstError)
+            {
+                std::rethrow_exception(firstError);
+            }
+        }
+
+        void deleteDirectoriesFromPlan(
+            const DeletePlan& plan,
+            DeleteProgressState& state,
+            const std::function<void(const ProjectDeleteProgress&)>& progress,
+            const std::filesystem::path& root,
+            std::uintmax_t totalBytes,
+            std::uintmax_t totalEntries)
+        {
+            for (const std::filesystem::path& directory : plan.directories)
+            {
+                removePathWithRetry(directory);
+                recordDeletedEntry(
+                    state,
+                    progress,
+                    root,
+                    directory,
+                    0,
+                    totalBytes,
+                    totalEntries,
+                    L"Удаляю папки сборки");
+            }
         }
 
         std::vector<std::filesystem::path> collectExternalConfigTargets(
@@ -1008,6 +1244,72 @@ namespace fluxora
 
             return resolved;
         }
+
+        std::optional<std::filesystem::path> defaultGameExecutablePath(
+            const BuildTemplate& resolved,
+            const std::filesystem::path& gameDirectory)
+        {
+            std::vector<std::wstring> candidateNames;
+            if (equalsIgnoreCase(resolved.id, L"skyrimse"))
+            {
+                candidateNames.push_back(L"SkyrimSE.exe");
+                candidateNames.push_back(L"Skyrim SE.exe");
+                candidateNames.push_back(L"SkyrimSELauncher.exe");
+            }
+
+            candidateNames.push_back(L"SkyrimSE.exe");
+            candidateNames.push_back(L"Skyrim SE.exe");
+            candidateNames.push_back(L"Fallout4.exe");
+            candidateNames.push_back(L"Starfield.exe");
+
+            std::vector<std::wstring> seen;
+            for (const std::wstring& candidateName : candidateNames)
+            {
+                const std::wstring key = toLower(candidateName);
+                if (std::find(seen.begin(), seen.end(), key) != seen.end())
+                {
+                    continue;
+                }
+                seen.push_back(key);
+
+                const std::filesystem::path candidate = gameDirectory / std::filesystem::path(candidateName);
+                if (isRegularFile(candidate))
+                {
+                    return std::filesystem::path(candidateName);
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        void writeDefaultLaunchExecutable(
+            JsonWriter& writer,
+            const BuildTemplate& resolved,
+            const std::filesystem::path& gameDirectory)
+        {
+            const std::optional<std::filesystem::path> executablePath =
+                defaultGameExecutablePath(resolved, gameDirectory);
+            if (!executablePath.has_value())
+            {
+                return;
+            }
+
+            std::wstring displayName = fileNameWithoutExtension(executablePath.value());
+            if (equalsIgnoreCase(resolved.id, L"skyrimse"))
+            {
+                displayName = L"Skyrim Special Edition";
+            }
+
+            writer.key(L"launchExecutables").beginArray();
+            writer.beginObject();
+            writer.field(L"id", L"game");
+            writer.field(L"displayName", displayName);
+            writer.field(L"executablePath", executablePath->wstring());
+            writer.field(L"arguments", L"");
+            writer.field(L"workingDirectory", L"");
+            writer.endObject();
+            writer.endArray();
+        }
     }
 
     ProjectService::ProjectService(Logger& logger, const TemplateService& templates) noexcept
@@ -1062,7 +1364,18 @@ namespace fluxora
         // template id throws std::invalid_argument and surfaces to the UI.
         const BuildTemplate resolved = templates_.resolve(request.templateId);
 
-        if (!std::filesystem::exists(request.gamePath) || !std::filesystem::is_directory(request.gamePath))
+        std::filesystem::path gameDirectory = std::filesystem::absolute(request.gamePath).lexically_normal();
+        if (isRegularFile(gameDirectory))
+        {
+            if (!hasExecutableExtension(gameDirectory))
+            {
+                throw std::invalid_argument("Game executable path must point to an .exe file.");
+            }
+
+            gameDirectory = gameDirectory.parent_path();
+        }
+
+        if (!isDirectory(gameDirectory))
         {
             throw std::invalid_argument("Game directory does not exist.");
         }
@@ -1082,7 +1395,7 @@ namespace fluxora
             request.name,
             resolved.id,
             resolved.gameName,
-            std::filesystem::absolute(request.gamePath),
+            gameDirectory,
             normalizedRoot,
             projectDirectory,
             manifestPath
@@ -1356,56 +1669,49 @@ namespace fluxora
             0,
             totalEntries);
 
-        std::uintmax_t deletedBytes = 0;
-        std::uintmax_t deletedEntries = 0;
-        for (const DeleteTarget& target : deletePlan.targets)
-        {
-            removeTreeWithRetry(target.path);
-            deletedBytes += target.bytes;
-            deletedEntries += (std::max)(std::uintmax_t{1}, target.entries);
-            publishDeleteProgress(
-                request.progress,
-                L"delete",
-                L"Удаляю файлы сборки",
-                relativeDisplayPath(projectDirectory, target.path),
-                calculateDeletePercent(deletedBytes, totalBytes, deletedEntries, totalEntries),
-                deletedBytes,
-                totalBytes,
-                deletedEntries,
-                totalEntries);
-        }
-
-        removeTreeWithRetry(projectDirectory);
-        deletedBytes = (std::max)(deletedBytes, deletePlan.totalBytes);
-        deletedEntries = (std::max)(deletedEntries, deletePlan.totalEntries);
-        publishDeleteProgress(
+        DeleteProgressState deleteState;
+        deleteFilesFromPlan(
+            deletePlan,
+            deleteState,
             request.progress,
-            L"delete",
-            L"Завершаю удаление",
-            projectDirectory.filename().wstring(),
-            calculateDeletePercent(deletedBytes, totalBytes, deletedEntries, totalEntries),
-            deletedBytes,
+            projectDirectory,
             totalBytes,
-            deletedEntries,
             totalEntries);
+        deleteDirectoriesFromPlan(
+            deletePlan,
+            deleteState,
+            request.progress,
+            projectDirectory,
+            totalBytes,
+            totalEntries);
+
+        removePathWithRetry(projectDirectory);
+        recordDeletedEntry(
+            deleteState,
+            request.progress,
+            projectDirectory,
+            projectDirectory,
+            0,
+            totalBytes,
+            totalEntries,
+            L"Завершаю удаление",
+            true);
 
         for (const std::filesystem::path& configTarget : configTargets)
         {
             std::error_code error;
             const std::uintmax_t configBytes = std::filesystem::file_size(configTarget, error);
             removePathWithRetry(configTarget);
-            deletedBytes += error ? 0 : configBytes;
-            ++deletedEntries;
-            publishDeleteProgress(
+            recordDeletedEntry(
+                deleteState,
                 request.progress,
-                L"delete",
-                L"Завершаю удаление",
-                L"",
-                calculateDeletePercent(deletedBytes, totalBytes, deletedEntries, totalEntries),
-                deletedBytes,
+                projectDirectory,
+                configTarget,
+                error ? 0 : configBytes,
                 totalBytes,
-                deletedEntries,
-                totalEntries);
+                totalEntries,
+                L"Завершаю удаление",
+                true);
         }
 
         projects_.erase(
@@ -1499,6 +1805,7 @@ namespace fluxora
         writer.stringArray(L"basePlugins", resolved.basePlugins);
         writer.stringArray(L"pluginExtensions", resolved.pluginExtensions);
         writer.stringArray(L"executables", resolved.executables);
+        writeDefaultLaunchExecutable(writer, resolved, project.gamePath);
 
         writer.key(L"capabilities").beginArray();
         for (const auto& capability : resolved.capabilities)

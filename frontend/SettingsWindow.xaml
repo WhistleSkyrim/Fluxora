@@ -5,6 +5,8 @@
         xmlns:services="clr-namespace:Fluxora.App.Services"
         xmlns:views="clr-namespace:Fluxora.App.Views"
         xmlns:controls="clr-namespace:Fluxora.App.Controls"
+        xmlns:models="clr-namespace:Fluxora.App.Models"
+        xmlns:svgc="http://sharpvectors.codeplex.com/svgc/"
         Title="Настройки"
         Width="900"
         Height="560"
@@ -127,22 +129,31 @@
         </Style>
 
         <Style x:Key="CaptionButtonStyle" TargetType="{x:Type Button}">
-            <Setter Property="Width" Value="48" />
+            <Setter Property="Width" Value="54" />
             <Setter Property="Height" Value="56" />
             <Setter Property="Padding" Value="0" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
-            <Setter Property="Cursor" Value="Arrow" />
+            <Setter Property="Cursor" Value="Hand" />
             <Setter Property="Focusable" Value="False" />
             <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type Button}">
-                        <Border x:Name="Root" Background="{TemplateBinding Background}">
+                        <Border Background="Transparent">
+                            <Border x:Name="Root"
+                                    Width="34"
+                                    Height="34"
+                                    Background="{StaticResource PanelRaisedBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center">
                             <Viewbox x:Name="CaptionGlyphBox"
-                                     Width="16"
-                                     Height="16"
+                                     Width="13"
+                                     Height="13"
                                      Stretch="Uniform"
                                      HorizontalAlignment="Center"
                                      VerticalAlignment="Center">
@@ -155,14 +166,17 @@
                                       StrokeEndLineCap="Round"
                                       StrokeLineJoin="Round" />
                             </Viewbox>
+                            </Border>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Root" Property="Background" Value="#BE123C" />
+                                <Setter TargetName="Root" Property="Background" Value="#2A1220" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#7F1D3A" />
                                 <Setter Property="Foreground" Value="#F7F4FF" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Root" Property="Background" Value="#9F1239" />
+                                <Setter TargetName="Root" Property="Background" Value="#3A1023" />
+                                <Setter TargetName="Root" Property="Opacity" Value="0.82" />
                             </Trigger>
                             <DataTrigger Binding="{Binding WindowState, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
                                          Value="Maximized">
@@ -269,12 +283,8 @@
             </Style.Triggers>
         </Style>
 
-        <!-- Steam-style settings section row: compact, single line, no chunky card.
-             Selection is bridged through the button's Tag (bound to the VM's
-             IsXSelected flag) so the template can drive both the sliding accent
-             indicator and the fill from one reusable style. Hover and selection
-             are fully animated; there is no scale-jank on the row. -->
-        <Style x:Key="SectionNavButtonStyle" TargetType="{x:Type Button}">
+        <!-- Steam-style settings section row: compact, single line, no chunky card. -->
+        <Style x:Key="SectionNavButtonStyle" TargetType="{x:Type ToggleButton}">
             <Setter Property="Height" Value="38" />
             <Setter Property="Margin" Value="0,1" />
             <Setter Property="Padding" Value="20,0,10,0" />
@@ -288,7 +298,7 @@
             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
             <Setter Property="Template">
                 <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type Button}">
+                    <ControlTemplate TargetType="{x:Type ToggleButton}">
                         <Grid ClipToBounds="True">
                             <Border x:Name="BaseFill"
                                     Background="{TemplateBinding Background}"
@@ -342,12 +352,12 @@
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                             </Trigger>
-                            <DataTrigger Binding="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}" Value="True">
+                            <Trigger Property="IsChecked" Value="True">
                                 <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                                 <Setter TargetName="SelectedFill" Property="Opacity" Value="1" />
                                 <Setter TargetName="HoverFill" Property="Opacity" Value="0" />
                                 <Setter TargetName="SelectedMarker" Property="Opacity" Value="1" />
-                                <DataTrigger.EnterActions>
+                                <Trigger.EnterActions>
                                     <BeginStoryboard>
                                         <Storyboard>
                                             <DoubleAnimation Storyboard.TargetName="SelectedFill"
@@ -360,8 +370,8 @@
                                                              Duration="0:0:0.2" />
                                         </Storyboard>
                                     </BeginStoryboard>
-                                </DataTrigger.EnterActions>
-                                <DataTrigger.ExitActions>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
                                     <BeginStoryboard>
                                         <Storyboard>
                                             <DoubleAnimation Storyboard.TargetName="SelectedFill"
@@ -374,8 +384,8 @@
                                                              Duration="0:0:0.18" />
                                         </Storyboard>
                                     </BeginStoryboard>
-                                </DataTrigger.ExitActions>
-                            </DataTrigger>
+                                </Trigger.ExitActions>
+                            </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -627,6 +637,230 @@
             </Setter>
         </Style>
 
+        <DataTemplate x:Key="LanguageOptionTemplate" DataType="{x:Type models:LanguageOption}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="42" />
+                    <ColumnDefinition Width="14" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Image Width="32"
+                       Height="32"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Center"
+                       Stretch="Uniform"
+                       RenderOptions.BitmapScalingMode="HighQuality">
+                    <Image.Style>
+                        <Style TargetType="{x:Type Image}">
+                            <Setter Property="Source"
+                                    Value="{svgc:SvgImage Source=/Assets/Emoji/flag_us.svg, AppName=FluxoraModding}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Code}" Value="de">
+                                    <Setter Property="Source"
+                                            Value="{svgc:SvgImage Source=/Assets/Emoji/flag_de.svg, AppName=FluxoraModding}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Code}" Value="ru">
+                                    <Setter Property="Source"
+                                            Value="{svgc:SvgImage Source=/Assets/Emoji/flag_ru.svg, AppName=FluxoraModding}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Image.Style>
+                </Image>
+
+                <TextBlock Grid.Column="2"
+                           Text="{Binding DisplayName}"
+                           VerticalAlignment="Center"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Foreground="{StaticResource TextBrush}"
+                           TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </DataTemplate>
+
+        <Style x:Key="LanguageComboBoxItemStyle" TargetType="{x:Type ComboBoxItem}">
+            <Setter Property="Height" Value="52" />
+            <Setter Property="Padding" Value="12,0" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="IsEnabled" Value="{Binding IsSelectable}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ComboBoxItem}">
+                        <Border x:Name="Root"
+                                Background="Transparent"
+                                BorderBrush="Transparent"
+                                BorderThickness="1"
+                                CornerRadius="11"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#3B3158" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="LanguageComboBoxStyle" TargetType="{x:Type ComboBox}">
+            <Setter Property="Height" Value="58" />
+            <Setter Property="Background" Value="{StaticResource PanelSoftBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ComboBox}">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton"
+                                          Focusable="False"
+                                          ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                                        <Border x:Name="Root"
+                                                Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderThickness="1"
+                                                CornerRadius="15">
+                                            <Grid>
+                                                <ContentPresenter Margin="14,0,54,0"
+                                                                  VerticalAlignment="Center"
+                                                                  HorizontalAlignment="Stretch"
+                                                                  Content="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                                  ContentTemplate="{Binding ItemTemplate, RelativeSource={RelativeSource AncestorType=ComboBox}}" />
+                                                <Path x:Name="Arrow"
+                                                      Width="12"
+                                                      Height="8"
+                                                      HorizontalAlignment="Right"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,20,0"
+                                                      Data="M1 1.5 L6 6.5 L11 1.5"
+                                                      Stroke="{StaticResource TextSecondaryBrush}"
+                                                      StrokeThickness="2"
+                                                      StrokeStartLineCap="Round"
+                                                      StrokeEndLineCap="Round"
+                                                      RenderTransformOrigin="0.5,0.5">
+                                                    <Path.RenderTransform>
+                                                        <RotateTransform Angle="0" />
+                                                    </Path.RenderTransform>
+                                                </Path>
+                                            </Grid>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource LineHoverBrush}" />
+                                            </Trigger>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                                                <Trigger.EnterActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetName="Arrow"
+                                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                                             To="180"
+                                                                             Duration="0:0:0.18" />
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </Trigger.EnterActions>
+                                                <Trigger.ExitActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetName="Arrow"
+                                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                                             To="0"
+                                                                             Duration="0:0:0.18" />
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </Trigger.ExitActions>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter TargetName="Root" Property="Opacity" Value="0.55" />
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Bottom"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   PopupAnimation="Fade">
+                                <Border x:Name="DropDown"
+                                        Margin="0,8,0,0"
+                                        Width="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                        MaxHeight="180"
+                                        Background="{StaticResource PanelSoftBrush}"
+                                        BorderBrush="{StaticResource LineHoverBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="15"
+                                        Padding="7"
+                                        SnapsToDevicePixels="True"
+                                        Opacity="0"
+                                        RenderTransformOrigin="0.5,0">
+                                    <Border.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform ScaleX="0.98" ScaleY="0.92" />
+                                            <TranslateTransform Y="-8" />
+                                        </TransformGroup>
+                                    </Border.RenderTransform>
+                                    <Border.Triggers>
+                                        <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                            <BeginStoryboard>
+                                                <Storyboard>
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="Opacity"
+                                                                     To="1"
+                                                                     Duration="0:0:0.14" />
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)"
+                                                                     To="1"
+                                                                     Duration="0:0:0.18" />
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)"
+                                                                     To="1"
+                                                                     Duration="0:0:0.18" />
+                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)"
+                                                                     To="0"
+                                                                     Duration="0:0:0.18" />
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </EventTrigger>
+                                    </Border.Triggers>
+                                    <ScrollViewer CanContentScroll="True"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  VerticalScrollBarVisibility="Disabled">
+                                        <ItemsPresenter />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="RoundedProgressBarStyle" TargetType="{x:Type ProgressBar}">
             <Setter Property="Height" Value="8" />
             <Setter Property="Foreground" Value="{StaticResource ProgressGradientBrush}" />
@@ -685,20 +919,12 @@
 
                     <StackPanel Orientation="Horizontal"
                                 VerticalAlignment="Center">
-                        <Border Width="34"
-                                Height="34"
-                                CornerRadius="10"
-                                Background="{StaticResource AccentSoftBrush}"
-                                BorderBrush="{StaticResource AccentLineBrush}"
-                                BorderThickness="1"
-                                Margin="0,0,11,0">
-                            <TextBlock FontFamily="Segoe MDL2 Assets"
-                                       Text="&#xE713;"
-                                       FontSize="15"
-                                       Foreground="#C4B5FD"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center" />
-                        </Border>
+                        <controls:LineIcon Data="{StaticResource Icon.Settings}"
+                                           Width="24"
+                                           Height="24"
+                                           StrokeThickness="2"
+                                           Foreground="#C4B5FD"
+                                           Margin="0,0,12,0" />
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock Text="Настройки"
                                        FontSize="21"
@@ -729,56 +955,56 @@
                         Style="{StaticResource PanelBorderStyle}"
                         Padding="10">
                     <StackPanel>
-                        <Button Style="{StaticResource SectionNavButtonStyle}"
-                                Command="{Binding SelectConnectionsCommand}"
-                                Tag="{Binding IsConnectionsSelected}"
-                                AutomationProperties.Name="Привязки">
+                        <ToggleButton Style="{StaticResource SectionNavButtonStyle}"
+                                      Command="{Binding SelectConnectionsCommand}"
+                                      IsChecked="{Binding IsConnectionsSelected, Mode=OneWay}"
+                                      AutomationProperties.Name="Привязки">
                             <StackPanel Orientation="Horizontal"
                                         VerticalAlignment="Center">
                                 <controls:LineIcon Data="{StaticResource Icon.Link}"
                                                    Width="17"
                                                    Height="17"
-                                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
                                                    Margin="0,0,11,0" />
                                 <TextBlock Text="Привязки"
                                            FontWeight="SemiBold"
                                            VerticalAlignment="Center" />
                             </StackPanel>
-                        </Button>
+                        </ToggleButton>
 
-                        <Button Style="{StaticResource SectionNavButtonStyle}"
-                                Command="{Binding SelectLanguagesCommand}"
-                                Tag="{Binding IsLanguagesSelected}"
-                                AutomationProperties.Name="Языки">
+                        <ToggleButton Style="{StaticResource SectionNavButtonStyle}"
+                                      Command="{Binding SelectLanguagesCommand}"
+                                      IsChecked="{Binding IsLanguagesSelected, Mode=OneWay}"
+                                      AutomationProperties.Name="Языки">
                             <StackPanel Orientation="Horizontal"
                                         VerticalAlignment="Center">
                                 <controls:LineIcon Data="{StaticResource Icon.Language}"
                                                    Width="17"
                                                    Height="17"
-                                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
                                                    Margin="0,0,11,0" />
                                 <TextBlock Text="Языки"
                                            FontWeight="SemiBold"
                                            VerticalAlignment="Center" />
                             </StackPanel>
-                        </Button>
+                        </ToggleButton>
 
-                        <Button Style="{StaticResource SectionNavButtonStyle}"
-                                Command="{Binding SelectTransferCommand}"
-                                Tag="{Binding IsTransferSelected}"
-                                AutomationProperties.Name="Перенос">
+                        <ToggleButton Style="{StaticResource SectionNavButtonStyle}"
+                                      Command="{Binding SelectTransferCommand}"
+                                      IsChecked="{Binding IsTransferSelected, Mode=OneWay}"
+                                      AutomationProperties.Name="Перенос">
                             <StackPanel Orientation="Horizontal"
                                         VerticalAlignment="Center">
                                 <controls:LineIcon Data="{StaticResource Icon.Transfer}"
                                                    Width="17"
                                                    Height="17"
-                                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
                                                    Margin="0,0,11,0" />
                                 <TextBlock Text="Перенос"
                                            FontWeight="SemiBold"
                                            VerticalAlignment="Center" />
                             </StackPanel>
-                        </Button>
+                        </ToggleButton>
                     </StackPanel>
                 </Border>
 
@@ -789,12 +1015,12 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
 
                             <StackPanel>
-                                <TextBlock Text="NexusMods"
+                                <TextBlock Text="Привязки"
                                            FontSize="32"
                                            FontWeight="Black"
                                            Foreground="{StaticResource TextBrush}" />
@@ -806,44 +1032,31 @@
 
                             <Border Grid.Row="1"
                                     Style="{StaticResource InnerPanelStyle}"
-                                    Padding="20"
-                                    Margin="0,22,0,18">
+                                    Padding="16"
+                                    Margin="0,18,0,0"
+                                    VerticalAlignment="Top">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="58" />
-                                        <ColumnDefinition Width="16" />
+                                        <ColumnDefinition Width="54" />
+                                        <ColumnDefinition Width="14" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
 
-                                    <Border Width="58"
-                                            Height="58"
-                                            CornerRadius="16"
-                                            Background="{StaticResource AccentGradientBrush}"
-                                            VerticalAlignment="Top">
-                                        <TextBlock FontFamily="Segoe MDL2 Assets"
-                                                   Text="&#xE774;"
-                                                   FontSize="24"
-                                                   Foreground="#F7F4FF"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center" />
-                                    </Border>
+                                    <Image Source="{StaticResource Image.NexusMods}"
+                                           Width="46"
+                                           Height="50"
+                                           Stretch="Uniform"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Center"
+                                           RenderOptions.BitmapScalingMode="HighQuality" />
 
                                     <StackPanel Grid.Column="2"
                                                 VerticalAlignment="Center">
                                         <TextBlock Text="{Binding NexusModsTitle}"
-                                                   FontSize="18"
+                                                   FontSize="17"
                                                    FontWeight="Black"
                                                    Foreground="{StaticResource TextBrush}"
-                                                   TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding NexusModsMessage}"
-                                                   Margin="0,7,0,0"
-                                                   Foreground="{StaticResource TextSecondaryBrush}"
-                                                   TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding NexusModsDetails}"
-                                                   Margin="0,8,0,0"
-                                                   FontSize="11"
-                                                   Foreground="{StaticResource MutedTextBrush}"
                                                    TextWrapping="Wrap" />
                                     </StackPanel>
 
@@ -852,7 +1065,7 @@
                                                 VerticalAlignment="Center"
                                                 Margin="20,0,0,0">
                                         <TextBlock Text="{Binding NexusModsToggleText}"
-                                                   MinWidth="72"
+                                                   MinWidth="44"
                                                    TextAlignment="Right"
                                                    Foreground="{StaticResource MutedTextBrush}"
                                                    VerticalAlignment="Center"
@@ -866,32 +1079,16 @@
                                 </Grid>
                             </Border>
 
-                            <ProgressBar Grid.Row="1"
+                            <ProgressBar Grid.Row="2"
                                          Height="3"
-                                         VerticalAlignment="Bottom"
+                                         VerticalAlignment="Top"
                                          IsIndeterminate="True"
                                          Foreground="{StaticResource AccentHoverBrush}"
                                          Background="#0E0C16"
                                          BorderThickness="0"
-                                         Margin="0,0,0,18"
+                                         Margin="0,12,0,0"
                                          Visibility="{Binding IsNexusBusy, Converter={StaticResource BooleanToVisibilityConverter}}" />
 
-                            <Grid Grid.Row="2">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="Изменения применяются сразу после ответа native bridge."
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           VerticalAlignment="Center"
-                                           TextWrapping="Wrap" />
-                                <Button Grid.Column="1"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="OnCloseButtonClick"
-                                        MinWidth="104"
-                                        Content="Закрыть"
-                                        Margin="18,0,0,0" />
-                            </Grid>
                         </Grid>
                     </Border>
 
@@ -903,7 +1100,6 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
-                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
 
                             <StackPanel>
@@ -911,22 +1107,16 @@
                                            FontSize="32"
                                            FontWeight="Black"
                                            Foreground="{StaticResource TextBrush}" />
-                                <TextBlock Text="Выберите язык приложения. Fluxora загрузит только выбранный lang-конфиг и обновит открытый интерфейс."
-                                           Margin="0,8,0,0"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           TextWrapping="Wrap" />
                             </StackPanel>
 
                             <Border Grid.Row="1"
                                     Style="{StaticResource InnerPanelStyle}"
                                     Padding="20"
-                                    Margin="0,22,0,18">
+                                    Margin="0,22,0,0">
                                 <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="10" />
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="12" />
                                         <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
@@ -934,27 +1124,12 @@
                                                Style="{StaticResource FieldLabelStyle}" />
 
                                     <ComboBox Grid.Row="2"
-                                              Style="{StaticResource TransferComboBoxStyle}"
+                                              Style="{StaticResource LanguageComboBoxStyle}"
+                                              ItemContainerStyle="{StaticResource LanguageComboBoxItemStyle}"
+                                              ItemTemplate="{StaticResource LanguageOptionTemplate}"
                                               ItemsSource="{Binding AvailableLanguages}"
                                               SelectedItem="{Binding SelectedLanguage}"
-                                              DisplayMemberPath="DisplayName"
                                               IsEnabled="{Binding IsLanguageSwitching, Converter={StaticResource InverseBooleanConverter}}" />
-
-                                    <StackPanel Grid.Row="4">
-                                        <TextBlock Text="{Binding SelectedLanguageText}"
-                                                   Foreground="{StaticResource TextBrush}"
-                                                   FontWeight="SemiBold"
-                                                   TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding LanguageStatus}"
-                                                   Margin="0,7,0,0"
-                                                   Foreground="{StaticResource MutedTextBrush}"
-                                                   TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding LanguageDirectoryText}"
-                                                   Margin="0,8,0,0"
-                                                   Foreground="{StaticResource SubtleTextBrush}"
-                                                   FontSize="11"
-                                                   TextTrimming="CharacterEllipsis" />
-                                    </StackPanel>
                                 </Grid>
                             </Border>
 
@@ -971,22 +1146,6 @@
                                            TextWrapping="Wrap" />
                             </Border>
 
-                            <Grid Grid.Row="3">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="Настройка сохраняется в settings.ini через C++ core: LANGUAGE=выбранный_язык."
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           VerticalAlignment="Center"
-                                           TextWrapping="Wrap" />
-                                <Button Grid.Column="1"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="OnCloseButtonClick"
-                                        MinWidth="104"
-                                        Content="Закрыть"
-                                        Margin="18,0,0,0" />
-                            </Grid>
                         </Grid>
                     </Border>
 
@@ -998,7 +1157,6 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
-                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
 
                             <StackPanel>
@@ -1006,10 +1164,6 @@
                                            FontSize="34"
                                            FontWeight="Black"
                                            Foreground="{StaticResource TextBrush}" />
-                                <TextBlock Text="Выберите источник, из которого нужно перенести сборку во Fluxora."
-                                           Margin="0,8,0,0"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           TextWrapping="Wrap" />
                             </StackPanel>
 
                             <Button Grid.Row="1"
@@ -1018,25 +1172,19 @@
                                     Margin="0,20,0,0">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="56" />
+                                        <ColumnDefinition Width="60" />
                                         <ColumnDefinition Width="16" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
 
-                                    <Border Width="56"
-                                            Height="56"
-                                            CornerRadius="14"
-                                            Background="#120F1A"
-                                            BorderBrush="{StaticResource LineBrush}"
-                                            BorderThickness="1"
-                                            VerticalAlignment="Center">
-                                        <Image Source="Assets/Images/mod-organizer-2.png"
-                                               Width="46"
-                                               Height="46"
-                                               Stretch="Uniform"
-                                               RenderOptions.BitmapScalingMode="HighQuality" />
-                                    </Border>
+                                    <Image Source="Assets/Images/mod-organizer-2.png"
+                                           Width="53"
+                                           Height="53"
+                                           Stretch="Uniform"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Center"
+                                           RenderOptions.BitmapScalingMode="HighQuality" />
 
                                     <StackPanel Grid.Column="2"
                                                 VerticalAlignment="Center">
@@ -1073,22 +1221,6 @@
                                 </Grid>
                             </Button>
 
-                            <Grid Grid.Row="3">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding TransferMessage}"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           TextWrapping="Wrap"
-                                           VerticalAlignment="Center" />
-                                <Button Grid.Column="1"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="OnCloseButtonClick"
-                                        MinWidth="104"
-                                        Content="Закрыть"
-                                        Margin="18,0,0,0" />
-                            </Grid>
                         </Grid>
                     </Border>
 

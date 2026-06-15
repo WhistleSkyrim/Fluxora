@@ -75,7 +75,7 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <Image Source="pack://application:,,,/Fluxora.ico"
+            <Image Source="pack://application:,,,/Fluxora.png"
                    Width="58"
                    Height="58"
                    Stretch="Uniform"
