@@ -1,11 +1,16 @@
 #include "FluxoraCore/FluxoraCoreApi.hpp"
 
 #include "FluxoraCore/Core.hpp"
+#include "FluxoraCore/GameSupport/GameDetectionService.hpp"
+#include "FluxoraCore/GameSupport/GameHealthCheckService.hpp"
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
+#include "FluxoraCore/GameSupport/ProjectFingerprint.hpp"
 #include "FluxoraCore/Services/AppSettingsService.hpp"
 #include "FluxoraCore/Services/BuildPathSettingsService.hpp"
 #include "FluxoraCore/Services/DownloadService.hpp"
 #include "FluxoraCore/Services/ExecutableIconService.hpp"
 #include "FluxoraCore/Services/ExecutableService.hpp"
+#include "FluxoraCore/Services/FluxPackService.hpp"
 #include "FluxoraCore/Services/ModService.hpp"
 #include "FluxoraCore/Services/ModOrganizerImportService.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
@@ -18,10 +23,13 @@
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <exception>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -70,6 +78,510 @@ namespace
         }
     }
 
+    struct GameBridgeMetadata
+    {
+        bool supported{false};
+        std::wstring gameId;
+        std::wstring displayName;
+        std::wstring uiTemplateId;
+        fluxora::CapabilitySet capabilities;
+        std::vector<std::wstring> archiveExtensions;
+        std::vector<std::wstring> requiredFiles;
+        fluxora::ContentLayoutSupportRules contentLayout;
+        std::vector<fluxora::GameExecutableDefinition> executableDefinitions;
+        std::vector<std::wstring> fallbackExecutables;
+        std::optional<fluxora::GameScriptExtenderRules> scriptExtenderLaunchRules;
+    };
+
+    std::vector<std::wstring> extensionValues(const std::vector<fluxora::NormalizedExtension>& extensions)
+    {
+        std::vector<std::wstring> values;
+        values.reserve(extensions.size());
+        for (const fluxora::NormalizedExtension& extension : extensions)
+        {
+            values.push_back(extension.value());
+        }
+
+        return values;
+    }
+
+    std::vector<std::wstring> executableNameValues(const std::vector<fluxora::ExecutableName>& names)
+    {
+        std::vector<std::wstring> values;
+        values.reserve(names.size());
+        for (const fluxora::ExecutableName& name : names)
+        {
+            values.push_back(name.displayName());
+        }
+
+        return values;
+    }
+
+    std::vector<std::wstring> pathValues(const std::vector<std::filesystem::path>& paths)
+    {
+        std::vector<std::wstring> values;
+        values.reserve(paths.size());
+        for (const std::filesystem::path& path : paths)
+        {
+            values.push_back(path.wstring());
+        }
+
+        return values;
+    }
+
+    fluxora::CapabilitySet capabilitySetFromTemplate(const fluxora::BuildTemplate& tpl)
+    {
+        fluxora::CapabilitySet set;
+        for (const fluxora::TemplateCapability& capability : tpl.capabilities)
+        {
+            if (capability.id == L"plugins")
+            {
+                set.enable(fluxora::GameCapability::Plugins);
+            }
+            else if (capability.id == L"load-order")
+            {
+                set.enable(fluxora::GameCapability::LoadOrder);
+            }
+            else if (capability.id == L"root-files")
+            {
+                set.enable(fluxora::GameCapability::RootFiles);
+            }
+            else if (capability.id == L"script-extender")
+            {
+                set.enable(fluxora::GameCapability::ScriptExtender);
+            }
+            else if (capability.id == L"ini-tweaks")
+            {
+                set.enable(fluxora::GameCapability::IniProfiles);
+            }
+            else if (capability.id == L"save-games")
+            {
+                set.enable(fluxora::GameCapability::SaveProfiles);
+            }
+            else if (capability.id == L"content-layout")
+            {
+                set.enable(fluxora::GameCapability::ContentLayoutRules);
+            }
+        }
+
+        if (!tpl.pluginExtensions.empty())
+        {
+            set.enable(fluxora::GameCapability::Plugins);
+        }
+
+        return set;
+    }
+
+    GameBridgeMetadata resolveGameBridgeMetadata(const fluxora::BuildTemplate& tpl)
+    {
+        GameBridgeMetadata metadata;
+        metadata.gameId = tpl.id;
+        metadata.displayName = tpl.gameName.empty() ? tpl.displayName : tpl.gameName;
+        metadata.uiTemplateId = tpl.id;
+        metadata.capabilities = capabilitySetFromTemplate(tpl);
+        metadata.contentLayout.dataFolder = tpl.dataDirectory;
+        metadata.contentLayout.supportsRootFiles =
+            metadata.capabilities.has(fluxora::GameCapability::RootFiles);
+        metadata.fallbackExecutables = tpl.executables;
+
+        const fluxora::GameSupportRegistry& registry = fluxora::GameSupportRegistry::embedded();
+        const fluxora::GameSupportLookupResult lookup = registry.lookupById(tpl.id);
+        if (!lookup.supported || lookup.definition == nullptr)
+        {
+            return metadata;
+        }
+
+        const fluxora::GameDefinition& definition = *lookup.definition;
+        metadata.supported = true;
+        metadata.gameId = definition.id.value();
+        metadata.displayName = definition.displayName;
+        metadata.uiTemplateId = definition.uiTemplateId.value();
+        metadata.capabilities = definition.capabilities;
+        metadata.archiveExtensions = extensionValues(definition.archiveExtensions);
+        metadata.requiredFiles = definition.healthRules.requiredFiles.empty()
+            ? definition.requiredFiles
+            : definition.healthRules.requiredFiles;
+        metadata.executableDefinitions = definition.executables;
+        metadata.scriptExtenderLaunchRules = definition.launchRules.scriptExtender;
+
+        if (lookup.support != nullptr &&
+            lookup.support->components().contentLayoutRulesProvider != nullptr)
+        {
+            metadata.contentLayout =
+                lookup.support->components().contentLayoutRulesProvider->contentLayoutRules();
+        }
+        else
+        {
+            metadata.contentLayout.dataFolder = definition.contentLayoutRules.dataFolder.empty()
+                ? definition.dataFolder
+                : definition.contentLayoutRules.dataFolder;
+            metadata.contentLayout.supportsRootFiles = definition.contentLayoutRules.supportsRootFiles;
+            metadata.contentLayout.rootFileWrapperDirectory =
+                definition.contentLayoutRules.rootFileWrapperDirectory;
+            metadata.contentLayout.pluginExtensions = definition.pluginExtensions;
+            metadata.contentLayout.archiveExtensions = definition.archiveExtensions;
+        }
+
+        return metadata;
+    }
+
+    void writeGameCapabilities(fluxora::JsonWriter& writer, const fluxora::CapabilitySet& capabilities)
+    {
+        writer.beginObject();
+        writer.field(L"bits", static_cast<int>(capabilities.bits()));
+        writer.field(L"supportsPlugins", capabilities.has(fluxora::GameCapability::Plugins));
+        writer.field(L"supportsLoadOrder", capabilities.has(fluxora::GameCapability::LoadOrder));
+        writer.field(L"supportsRootFiles", capabilities.has(fluxora::GameCapability::RootFiles));
+        writer.field(L"supportsArchives", capabilities.has(fluxora::GameCapability::Archives));
+        writer.field(L"supportsScriptExtender", capabilities.has(fluxora::GameCapability::ScriptExtender));
+        writer.field(L"supportsIniProfiles", capabilities.has(fluxora::GameCapability::IniProfiles));
+        writer.field(L"supportsSaveProfiles", capabilities.has(fluxora::GameCapability::SaveProfiles));
+        writer.field(L"supportsGameSpecificVfs", capabilities.has(fluxora::GameCapability::GameSpecificVfs));
+        writer.field(L"supportsContentLayoutRules", capabilities.has(fluxora::GameCapability::ContentLayoutRules));
+        writer.key(L"enabled").beginArray();
+        if (capabilities.has(fluxora::GameCapability::Plugins))
+        {
+            writer.value(L"plugins");
+        }
+        if (capabilities.has(fluxora::GameCapability::LoadOrder))
+        {
+            writer.value(L"loadOrder");
+        }
+        if (capabilities.has(fluxora::GameCapability::RootFiles))
+        {
+            writer.value(L"rootFiles");
+        }
+        if (capabilities.has(fluxora::GameCapability::Archives))
+        {
+            writer.value(L"archives");
+        }
+        if (capabilities.has(fluxora::GameCapability::ScriptExtender))
+        {
+            writer.value(L"scriptExtender");
+        }
+        if (capabilities.has(fluxora::GameCapability::IniProfiles))
+        {
+            writer.value(L"iniProfiles");
+        }
+        if (capabilities.has(fluxora::GameCapability::SaveProfiles))
+        {
+            writer.value(L"saveProfiles");
+        }
+        if (capabilities.has(fluxora::GameCapability::GameSpecificVfs))
+        {
+            writer.value(L"gameSpecificVfs");
+        }
+        if (capabilities.has(fluxora::GameCapability::ContentLayoutRules))
+        {
+            writer.value(L"contentLayoutRules");
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    std::wstring executableRoleName(fluxora::GameExecutableRole role)
+    {
+        switch (role)
+        {
+        case fluxora::GameExecutableRole::Primary:
+            return L"primary";
+        case fluxora::GameExecutableRole::Launcher:
+            return L"launcher";
+        case fluxora::GameExecutableRole::ScriptExtender:
+            return L"scriptExtender";
+        }
+
+        return L"primary";
+    }
+
+    std::wstring workingDirectoryKindName(
+        const std::optional<fluxora::GameExecutableWorkingDirectoryKind>& kind)
+    {
+        if (!kind.has_value())
+        {
+            return {};
+        }
+
+        switch (kind.value())
+        {
+        case fluxora::GameExecutableWorkingDirectoryKind::ExecutableDirectory:
+            return L"executableDirectory";
+        case fluxora::GameExecutableWorkingDirectoryKind::GameRoot:
+            return L"gameRoot";
+        }
+
+        return {};
+    }
+
+    void writeExecutableDisplayMetadata(
+        fluxora::JsonWriter& writer,
+        std::wstring id,
+        std::wstring displayName,
+        std::wstring executableName,
+        std::wstring role,
+        std::wstring workingDirectoryKind,
+        bool isPrimary,
+        bool isLauncher,
+        bool isScriptExtender)
+    {
+        writer.beginObject();
+        writer.field(L"id", id);
+        writer.field(L"displayName", displayName);
+        writer.field(L"executableName", executableName);
+        writer.field(L"role", role);
+        writer.field(L"workingDirectoryKind", workingDirectoryKind);
+        writer.field(L"isPrimary", isPrimary);
+        writer.field(L"isLauncher", isLauncher);
+        writer.field(L"isScriptExtender", isScriptExtender);
+        writer.endObject();
+    }
+
+    void writeExecutableDisplayMetadataList(
+        fluxora::JsonWriter& writer,
+        const GameBridgeMetadata& metadata)
+    {
+        writer.beginArray();
+        for (const fluxora::GameExecutableDefinition& executable : metadata.executableDefinitions)
+        {
+            writeExecutableDisplayMetadata(
+                writer,
+                executable.id,
+                executable.displayName,
+                executable.name.displayName(),
+                executableRoleName(executable.role),
+                workingDirectoryKindName(executable.workingDirectory),
+                executable.role == fluxora::GameExecutableRole::Primary,
+                executable.role == fluxora::GameExecutableRole::Launcher,
+                executable.role == fluxora::GameExecutableRole::ScriptExtender);
+        }
+
+        if (metadata.executableDefinitions.empty())
+        {
+            int index = 1;
+            for (const std::wstring& executableName : metadata.fallbackExecutables)
+            {
+                writeExecutableDisplayMetadata(
+                    writer,
+                    L"executable-" + std::to_wstring(index),
+                    executableName,
+                    executableName,
+                    index == 1 ? L"primary" : L"",
+                    L"",
+                    index == 1,
+                    false,
+                    false);
+                ++index;
+            }
+        }
+
+        writer.endArray();
+    }
+
+    void writeLaunchTrackingMetadata(
+        fluxora::JsonWriter& writer,
+        fluxora::LaunchTrackingKind kind,
+        const std::vector<std::wstring>& expectedChildProcessNames,
+        const std::wstring& handoffDisplayName,
+        std::uint32_t handoffTimeoutMs)
+    {
+        writer.beginObject();
+        writer.field(L"kind", fluxora::launchTrackingKindName(kind));
+        writer.stringArray(L"expectedChildProcessNames", expectedChildProcessNames);
+        writer.field(L"handoffDisplayName", handoffDisplayName);
+        writer.field(L"handoffTimeoutMs", static_cast<int>(handoffTimeoutMs));
+        writer.endObject();
+    }
+
+    void writeLaunchTrackingMetadata(
+        fluxora::JsonWriter& writer,
+        const GameBridgeMetadata& metadata)
+    {
+        if (metadata.scriptExtenderLaunchRules.has_value())
+        {
+            const fluxora::GameScriptExtenderRules& scriptExtender =
+                metadata.scriptExtenderLaunchRules.value();
+            writeLaunchTrackingMetadata(
+                writer,
+                scriptExtender.launchTrackingKind,
+                executableNameValues(scriptExtender.expectedChildProcessNames),
+                scriptExtender.handoffDisplayName,
+                scriptExtender.handoffTimeoutMs);
+            return;
+        }
+
+        writeLaunchTrackingMetadata(
+            writer,
+            fluxora::LaunchTrackingKind::DirectProcess,
+            {},
+            {},
+            0);
+    }
+
+    void writeContentLayoutSummary(
+        fluxora::JsonWriter& writer,
+        const GameBridgeMetadata& metadata)
+    {
+        const bool supported =
+            metadata.capabilities.has(fluxora::GameCapability::ContentLayoutRules);
+        const std::vector<std::wstring> archiveExtensions =
+            metadata.archiveExtensions.empty()
+                ? extensionValues(metadata.contentLayout.archiveExtensions)
+                : metadata.archiveExtensions;
+
+        writer.beginObject();
+        writer.field(L"supported", supported);
+        writer.field(L"hasWarnings", false);
+        writer.field(L"hasBlockers", false);
+        writer.field(L"dataFolder", metadata.contentLayout.dataFolder);
+        writer.field(L"supportsRootFiles", metadata.contentLayout.supportsRootFiles);
+        writer.field(L"rootFileWrapperDirectory", metadata.contentLayout.rootFileWrapperDirectory);
+        writer.stringArray(L"pluginExtensions", extensionValues(metadata.contentLayout.pluginExtensions));
+        writer.stringArray(L"archiveExtensions", archiveExtensions);
+        writer.stringArray(L"scriptExtenderLoaders", executableNameValues(metadata.contentLayout.scriptExtenderLoaders));
+        writer.stringArray(L"gameDataDirectories", metadata.contentLayout.gameDataDirectories);
+        writer.stringArray(L"scriptExtenderDataPaths", pathValues(metadata.contentLayout.scriptExtenderDataPaths));
+        writer.field(
+            L"summary",
+            supported
+                ? L"Content placement is driven by the selected game definition."
+                : L"Content layout rules are not enabled for this game.");
+        writer.key(L"details").beginArray();
+        if (!metadata.contentLayout.dataFolder.empty())
+        {
+            writer.value(L"Game data content is placed under " + metadata.contentLayout.dataFolder + L".");
+        }
+        if (metadata.contentLayout.supportsRootFiles)
+        {
+            writer.value(L"Root files can be staged through the configured wrapper directory.");
+        }
+        if (!archiveExtensions.empty())
+        {
+            writer.value(L"Archive extensions are exposed separately from plugin extensions.");
+        }
+        writer.endArray();
+        writer.stringArray(L"warnings", {});
+        writer.stringArray(L"blockers", {});
+        writer.endObject();
+    }
+
+    void writeHealthFinding(fluxora::JsonWriter& writer, const fluxora::GameHealthFinding& finding)
+    {
+        writer.beginObject();
+        writer.field(L"severity", fluxora::GameHealthCheckService::healthSeverityName(finding.severity));
+        writer.field(L"code", finding.code);
+        writer.field(L"message", finding.message);
+        writer.field(L"path", finding.path.wstring());
+        writer.field(L"critical", finding.critical);
+        writer.endObject();
+    }
+
+    void writeGameHealthSummary(fluxora::JsonWriter& writer, const fluxora::GameHealthCheckResult& health)
+    {
+        writer.beginObject();
+        writer.field(L"gameId", health.gameId.value());
+        writer.field(L"displayName", health.displayName);
+        writer.field(L"status", fluxora::GameHealthCheckService::healthStatusName(health.status));
+        writer.field(L"summary", health.summary);
+        writer.field(L"hasBlockers", health.hasBlockers());
+        writer.field(L"allowsAutomation", health.allowsAutomation());
+        writer.stringArray(L"matchedFiles", health.matchedFiles);
+        writer.stringArray(L"missingFiles", health.missingFiles);
+        writer.stringArray(L"warnings", health.warnings);
+        writer.key(L"findings").beginArray();
+        for (const fluxora::GameHealthFinding& finding : health.findings)
+        {
+            writeHealthFinding(writer, finding);
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    bool healthStatusHasBlockers(std::wstring status)
+    {
+        status = fluxora::toAsciiLower(fluxora::trimAscii(status));
+        return status == L"broken" || status == L"unsupported";
+    }
+
+    void writeFallbackGameHealthSummary(
+        fluxora::JsonWriter& writer,
+        const fluxora::ProjectDescriptor& project,
+        const GameBridgeMetadata& metadata)
+    {
+        const bool hasFingerprint = project.fingerprint.has_value();
+        const std::wstring status = hasFingerprint && !project.fingerprint->healthStatusAtCreation.empty()
+            ? project.fingerprint->healthStatusAtCreation
+            : L"unknown";
+        const std::wstring gameId = hasFingerprint && !project.fingerprint->gameId.empty()
+            ? project.fingerprint->gameId
+            : metadata.gameId;
+        const std::wstring displayName = hasFingerprint && !project.fingerprint->gameDisplayName.empty()
+            ? project.fingerprint->gameDisplayName
+            : metadata.displayName;
+
+        writer.beginObject();
+        writer.field(L"gameId", gameId);
+        writer.field(L"displayName", displayName);
+        writer.field(L"status", status);
+        writer.field(
+            L"summary",
+            hasFingerprint
+                ? L"Health status recorded when the project was created."
+                : L"Health status is unavailable for this project.");
+        writer.field(L"hasBlockers", healthStatusHasBlockers(status));
+        writer.field(L"allowsAutomation", !healthStatusHasBlockers(status) && status != L"unknown");
+        writer.stringArray(L"matchedFiles", {});
+        writer.stringArray(L"missingFiles", {});
+        writer.stringArray(L"warnings", {});
+        writer.key(L"findings").beginArray().endArray();
+        writer.endObject();
+    }
+
+    void writeProjectHealthSummary(
+        fluxora::JsonWriter& writer,
+        const fluxora::ProjectDescriptor& project,
+        const GameBridgeMetadata& metadata,
+        const std::filesystem::path& gamePath,
+        bool allowFilesystemCheck)
+    {
+        if (allowFilesystemCheck && metadata.supported && !metadata.gameId.empty() && !gamePath.empty())
+        {
+            try
+            {
+                const fluxora::GameSupportRegistry& registry = fluxora::GameSupportRegistry::embedded();
+                fluxora::GameDetectionService detectionService(registry);
+                fluxora::GameDetectionRequest request;
+                request.manualGameId = fluxora::GameId::parseOrThrow(metadata.gameId);
+                request.installPath = gamePath;
+
+                const fluxora::GameDetectionResult detection = detectionService.detect(request);
+                if (detection.detected)
+                {
+                    writeGameHealthSummary(writer, fluxora::GameHealthCheckService().check(detection));
+                    return;
+                }
+            }
+            catch (const std::exception&)
+            {
+            }
+        }
+
+        writeFallbackGameHealthSummary(writer, project, metadata);
+    }
+
+    void writeProjectFingerprint(
+        fluxora::JsonWriter& writer,
+        const std::optional<fluxora::ProjectFingerprint>& fingerprint)
+    {
+        if (fingerprint.has_value())
+        {
+            fluxora::writeProjectFingerprint(writer, fingerprint.value());
+        }
+        else
+        {
+            writer.nullValue();
+        }
+    }
+
     void writeGameExecutable(fluxora::JsonWriter& writer, const fluxora::GameExecutable& executable)
     {
         writer.beginObject();
@@ -79,6 +591,17 @@ namespace
         writer.field(L"arguments", executable.arguments);
         writer.field(L"workingDirectory", executable.workingDirectory);
         writer.field(L"iconPath", executable.iconPath);
+        writer.key(L"executableDisplayMetadata");
+        writeExecutableDisplayMetadata(
+            writer,
+            executable.id,
+            executable.displayName,
+            std::filesystem::path(executable.executablePath).filename().wstring(),
+            L"",
+            executable.workingDirectory.empty() ? L"executableDirectory" : L"",
+            false,
+            false,
+            false);
         writer.endObject();
     }
 
@@ -113,6 +636,29 @@ namespace
         writer.field(L"iconPath", result.executable.iconPath);
         writer.field(L"resolvedExecutablePath", result.resolvedExecutablePath.wstring());
         writer.field(L"resolvedWorkingDirectory", result.resolvedWorkingDirectory.wstring());
+        writer.field(L"launchTrackingKind", fluxora::launchTrackingKindName(result.launchTrackingKind));
+        writer.stringArray(L"expectedChildProcessNames", result.expectedChildProcessNames);
+        writer.field(L"handoffDisplayName", result.handoffDisplayName);
+        writer.field(L"handoffTimeoutMs", static_cast<int>(result.handoffTimeoutMs));
+        writer.key(L"launchTrackingMetadata");
+        writeLaunchTrackingMetadata(
+            writer,
+            result.launchTrackingKind,
+            result.expectedChildProcessNames,
+            result.handoffDisplayName,
+            result.handoffTimeoutMs);
+        writer.key(L"executableDisplayMetadata");
+        writeExecutableDisplayMetadata(
+            writer,
+            result.executable.id,
+            result.executable.displayName,
+            std::filesystem::path(result.executable.executablePath).filename().wstring(),
+            L"",
+            result.executable.workingDirectory.empty() ? L"executableDirectory" : L"",
+            false,
+            false,
+            false);
+        writer.field(L"processId", static_cast<int>(result.processId));
         writer.endObject();
         return writer.str();
     }
@@ -137,13 +683,59 @@ namespace
         return writer.str();
     }
 
+    void writeFluxPackSummary(fluxora::JsonWriter& writer, const fluxora::FluxPackSummary& summary)
+    {
+        writer.beginObject();
+        writer.field(L"outputPath", summary.outputPath.wstring());
+        writer.field(L"buildName", summary.buildName);
+        writer.field(L"formatVersion", summary.formatVersion);
+        writer.field(L"manifestBytes", summary.manifestBytes);
+        writer.field(L"sourceArchiveCount", summary.sourceArchiveCount);
+        writer.field(L"generatedAssetCount", summary.generatedAssetCount);
+        writer.field(L"customPatchCount", summary.customPatchCount);
+        writer.field(L"customConfigCount", summary.customConfigCount);
+        writer.field(L"installStepCount", summary.installStepCount);
+        writer.field(L"generatedAssetsIncluded", summary.generatedAssetsIncluded);
+        writer.field(L"installPlanAvailable", summary.installPlanAvailable);
+        writer.endObject();
+    }
+
+    std::wstring serializeFluxPackSummary(const fluxora::FluxPackSummary& summary)
+    {
+        fluxora::JsonWriter writer;
+        writeFluxPackSummary(writer, summary);
+        return writer.str();
+    }
+
+    std::wstring serializeFluxPackInstallResult(const fluxora::FluxPackInstallResult& result)
+    {
+        fluxora::JsonWriter writer;
+        writer.beginObject();
+        writer.key(L"summary");
+        writeFluxPackSummary(writer, result.summary);
+        writer.field(L"configPath", result.configPath.wstring());
+        writer.field(L"projectDirectory", result.projectDirectory.wstring());
+        writer.field(L"buildName", result.buildName);
+        writer.field(L"totalSourceCount", result.totalSourceCount);
+        writer.field(L"installedSourceCount", result.installedSourceCount);
+        writer.field(L"pendingSourceCount", result.pendingSourceCount);
+        writer.field(L"failedSourceCount", result.failedSourceCount);
+        writer.field(L"appliedConfigCount", result.appliedConfigCount);
+        writer.field(L"appliedProfileOrderItemCount", result.appliedProfileOrderItemCount);
+        writer.field(L"hasWarnings", result.hasWarnings);
+        writer.endObject();
+        return writer.str();
+    }
+
     void writeResolvedTemplate(fluxora::JsonWriter& writer, const fluxora::BuildTemplate& tpl)
     {
+        const GameBridgeMetadata metadata = resolveGameBridgeMetadata(tpl);
         writer.beginObject();
         writer.field(L"id", tpl.id);
         writer.field(L"displayName", tpl.displayName);
         writer.field(L"gameName", tpl.gameName);
         writer.field(L"summary", tpl.summary);
+        writer.field(L"uiTemplateId", metadata.uiTemplateId);
         writer.field(L"baseTemplateId", tpl.baseTemplateId);
         writer.field(L"defaultProfile", tpl.defaultProfileName);
         writer.field(L"dataDirectory", tpl.dataDirectory);
@@ -152,8 +744,18 @@ namespace
         writer.stringArray(L"profileFiles", tpl.profileFiles);
         writer.stringArray(L"basePlugins", tpl.basePlugins);
         writer.stringArray(L"pluginExtensions", tpl.pluginExtensions);
+        writer.stringArray(L"archiveExtensions", metadata.archiveExtensions);
+        writer.stringArray(L"requiredFiles", metadata.requiredFiles);
         writer.stringArray(L"executables", tpl.executables);
         writeCapabilities(writer, tpl);
+        writer.key(L"gameCapabilities");
+        writeGameCapabilities(writer, metadata.capabilities);
+        writer.key(L"contentLayoutSummary");
+        writeContentLayoutSummary(writer, metadata);
+        writer.key(L"executableDisplayMetadata");
+        writeExecutableDisplayMetadataList(writer, metadata);
+        writer.key(L"launchTrackingMetadata");
+        writeLaunchTrackingMetadata(writer, metadata);
         writeScriptExtender(writer, tpl);
         writer.endObject();
     }
@@ -190,15 +792,31 @@ namespace
             }
         }
 
+        const GameBridgeMetadata metadata = resolveGameBridgeMetadata(result.resolvedTemplate);
+
         writer.beginObject();
         writer.field(L"id", project.configPath.wstring());
         writer.field(L"name", project.name);
         writer.field(L"templateId", project.templateId);
+        writer.field(L"uiTemplateId", metadata.uiTemplateId);
         writer.field(L"gameName", project.gameName);
         writer.field(L"gamePath", pathSettings.gameDirectory.wstring());
         writer.field(L"installRootDirectory", project.installRootDirectory.wstring());
         writer.field(L"projectDirectory", project.projectDirectory.wstring());
         writer.field(L"configPath", project.configPath.wstring());
+        writer.key(L"gameCapabilities");
+        writeGameCapabilities(writer, metadata.capabilities);
+        writer.key(L"gameHealthSummary");
+        writeProjectHealthSummary(
+            writer,
+            project,
+            metadata,
+            pathSettings.gameDirectory,
+            !tolerateExecutableErrors);
+        writer.key(L"projectFingerprint");
+        writeProjectFingerprint(writer, project.fingerprint);
+        writer.key(L"contentLayoutSummary");
+        writeContentLayoutSummary(writer, metadata);
         writer.key(L"paths");
         writeBuildPathSettings(writer, pathSettings);
         writer.key(L"executables");
@@ -247,11 +865,17 @@ namespace
         writer.beginArray();
         for (const auto& tpl : templates)
         {
+            const GameBridgeMetadata metadata = resolveGameBridgeMetadata(tpl);
             writer.beginObject();
             writer.field(L"id", tpl.id);
             writer.field(L"displayName", tpl.displayName);
             writer.field(L"gameName", tpl.gameName);
             writer.field(L"summary", tpl.summary);
+            writer.field(L"uiTemplateId", metadata.uiTemplateId);
+            writer.key(L"gameCapabilities");
+            writeGameCapabilities(writer, metadata.capabilities);
+            writer.stringArray(L"archiveExtensions", metadata.archiveExtensions);
+            writer.stringArray(L"requiredFiles", metadata.requiredFiles);
             writer.endObject();
         }
         writer.endArray();
@@ -323,6 +947,326 @@ namespace
         writer.field(L"name", mod.name);
         writer.field(L"version", mod.version);
         writer.field(L"isEnabled", mod.isEnabled);
+        writer.endObject();
+        return writer.str();
+    }
+
+    std::wstring placementTargetName(fluxora::PlacementTarget target)
+    {
+        switch (target)
+        {
+        case fluxora::PlacementTarget::GameRoot:
+            return L"gameRoot";
+        case fluxora::PlacementTarget::Data:
+            return L"data";
+        case fluxora::PlacementTarget::Profile:
+            return L"profile";
+        case fluxora::PlacementTarget::Overwrite:
+            return L"overwrite";
+        case fluxora::PlacementTarget::Blocked:
+            return L"blocked";
+        }
+
+        return L"unknown";
+    }
+
+    std::wstring contentAreaName(fluxora::ContentArea area)
+    {
+        switch (area)
+        {
+        case fluxora::ContentArea::GameRoot:
+            return L"gameRoot";
+        case fluxora::ContentArea::Data:
+            return L"data";
+        case fluxora::ContentArea::Profile:
+            return L"profile";
+        case fluxora::ContentArea::Ini:
+            return L"ini";
+        case fluxora::ContentArea::Saves:
+            return L"saves";
+        case fluxora::ContentArea::Overwrite:
+            return L"overwrite";
+        }
+
+        return L"unknown";
+    }
+
+    std::wstring contentLayoutClassificationName(fluxora::ContentLayoutClassification classification)
+    {
+        switch (classification)
+        {
+        case fluxora::ContentLayoutClassification::GameData:
+            return L"gameData";
+        case fluxora::ContentLayoutClassification::GameRoot:
+            return L"gameRoot";
+        case fluxora::ContentLayoutClassification::Plugin:
+            return L"plugin";
+        case fluxora::ContentLayoutClassification::Archive:
+            return L"archive";
+        case fluxora::ContentLayoutClassification::ScriptExtender:
+            return L"scriptExtender";
+        case fluxora::ContentLayoutClassification::Config:
+            return L"config";
+        case fluxora::ContentLayoutClassification::Ini:
+            return L"ini";
+        case fluxora::ContentLayoutClassification::Save:
+            return L"save";
+        case fluxora::ContentLayoutClassification::ToolExecutable:
+            return L"toolExecutable";
+        case fluxora::ContentLayoutClassification::Documentation:
+            return L"documentation";
+        case fluxora::ContentLayoutClassification::Screenshots:
+            return L"screenshots";
+        case fluxora::ContentLayoutClassification::Unknown:
+            return L"unknown";
+        case fluxora::ContentLayoutClassification::Unsafe:
+            return L"unsafe";
+        }
+
+        return L"unknown";
+    }
+
+    void writePlacementPlanSummary(
+        fluxora::JsonWriter& writer,
+        const fluxora::ContentLayoutSummary& summary)
+    {
+        writer.beginObject();
+        writer.field(L"supported", summary.supported);
+        writer.field(L"hasWarnings", summary.hasWarnings);
+        writer.field(L"hasBlockers", summary.hasBlockers);
+        writer.field(L"totalEntries", static_cast<std::uintmax_t>(summary.totalEntries));
+        writer.field(L"plannedEntries", static_cast<std::uintmax_t>(summary.plannedEntries));
+        writer.field(L"gameDataEntries", static_cast<std::uintmax_t>(summary.gameDataEntries));
+        writer.field(L"gameRootEntries", static_cast<std::uintmax_t>(summary.gameRootEntries));
+        writer.field(L"pluginEntries", static_cast<std::uintmax_t>(summary.pluginEntries));
+        writer.field(L"archiveEntries", static_cast<std::uintmax_t>(summary.archiveEntries));
+        writer.field(L"scriptExtenderEntries", static_cast<std::uintmax_t>(summary.scriptExtenderEntries));
+        writer.field(L"unknownEntries", static_cast<std::uintmax_t>(summary.unknownEntries));
+        writer.field(L"unsafeEntries", static_cast<std::uintmax_t>(summary.unsafeEntries));
+        writer.endObject();
+    }
+
+    void writePlacementPlanEntry(
+        fluxora::JsonWriter& writer,
+        const fluxora::PlacementPlanEntry& entry)
+    {
+        writer.beginObject();
+        writer.field(L"sourcePath", entry.sourcePath.path().generic_wstring());
+        writer.field(L"target", placementTargetName(entry.target));
+        writer.field(L"contentArea", contentAreaName(entry.contentArea));
+        writer.field(L"targetRelativePath", entry.targetRelativePath.path().generic_wstring());
+        writer.field(L"classification", contentLayoutClassificationName(entry.classification));
+        writer.field(L"explanation", entry.explanation);
+        writer.field(L"manualOverrideAllowed", entry.manualOverrideAllowed);
+        writer.key(L"safeManualTargets").beginArray();
+        for (fluxora::PlacementTarget target : entry.safeManualTargets)
+        {
+            writer.value(placementTargetName(target));
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    void writePlacementFinding(
+        fluxora::JsonWriter& writer,
+        const fluxora::ValidationFinding& finding)
+    {
+        writer.beginObject();
+        writer.field(L"severity", fluxora::GameHealthCheckService::healthSeverityName(finding.severity));
+        writer.field(
+            L"path",
+            finding.path.has_value()
+                ? finding.path->path().generic_wstring()
+                : std::wstring{});
+        writer.field(L"classification", contentLayoutClassificationName(finding.classification));
+        writer.field(L"message", finding.message);
+        writer.field(L"blocksInstall", finding.blocksInstall);
+        writer.endObject();
+    }
+
+    std::wstring serializePlacementPlan(const fluxora::PlacementPlan& plan)
+    {
+        fluxora::JsonWriter writer;
+        writer.beginObject();
+        writer.field(L"gameId", plan.gameId.value());
+        writer.field(L"gameDisplayName", plan.gameDisplayName);
+        writer.field(L"rootFileWrapperDirectory", plan.rootFileWrapperDirectory);
+        writer.field(L"canInstall", plan.canInstall());
+        writer.key(L"summary");
+        writePlacementPlanSummary(writer, plan.summary);
+        writer.key(L"entries").beginArray();
+        for (const fluxora::PlacementPlanEntry& entry : plan.entries)
+        {
+            writePlacementPlanEntry(writer, entry);
+        }
+        writer.endArray();
+        writer.key(L"validationFindings").beginArray();
+        for (const fluxora::ValidationFinding& finding : plan.validationFindings)
+        {
+            writePlacementFinding(writer, finding);
+        }
+        writer.endArray();
+        writer.field(L"explanationSummary", plan.userExplanation.summary);
+        writer.stringArray(L"explanationDetails", plan.userExplanation.details);
+        writer.endObject();
+        return writer.str();
+    }
+
+    void writeFomodFileEntry(fluxora::JsonWriter& writer, const fluxora::FomodFileEntry& file)
+    {
+        writer.beginObject();
+        writer.field(L"source", file.source);
+        writer.field(L"destination", file.destination);
+        writer.field(L"isFolder", file.isFolder);
+        writer.field(L"alwaysInstall", file.alwaysInstall);
+        writer.field(L"installIfUsable", file.installIfUsable);
+        writer.field(L"priority", file.priority);
+        writer.endObject();
+    }
+
+    void writeFomodFileDependencyState(
+        fluxora::JsonWriter& writer,
+        const fluxora::FomodFileDependencyState& dependency)
+    {
+        writer.beginObject();
+        writer.field(L"file", dependency.file);
+        writer.field(L"exists", dependency.exists);
+        writer.endObject();
+    }
+
+    void writeFomodDependency(fluxora::JsonWriter& writer, const fluxora::FomodDependencyNode& dependency)
+    {
+        writer.beginObject();
+        writer.field(L"kind", dependency.kind);
+        writer.field(L"operator", dependency.op);
+        writer.field(L"file", dependency.file);
+        writer.field(L"state", dependency.state);
+        writer.field(L"flag", dependency.flag);
+        writer.field(L"value", dependency.value);
+        writer.field(L"version", dependency.version);
+        writer.key(L"children").beginArray();
+        for (const fluxora::FomodDependencyNode& child : dependency.children)
+        {
+            writeFomodDependency(writer, child);
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    void writeFomodOption(fluxora::JsonWriter& writer, const fluxora::FomodOption& option)
+    {
+        writer.beginObject();
+        writer.field(L"id", option.id);
+        writer.field(L"name", option.name);
+        writer.field(L"description", option.description);
+        writer.field(L"imagePath", option.imagePath);
+        writer.field(L"type", option.type);
+        writer.field(L"defaultType", option.defaultType);
+        writer.key(L"flags").beginArray();
+        for (const fluxora::FomodConditionFlag& flag : option.flags)
+        {
+            writer.beginObject();
+            writer.field(L"name", flag.name);
+            writer.field(L"value", flag.value);
+            writer.endObject();
+        }
+        writer.endArray();
+        writer.key(L"typePatterns").beginArray();
+        for (const fluxora::FomodTypePattern& pattern : option.typePatterns)
+        {
+            writer.beginObject();
+            writer.key(L"dependencies");
+            writeFomodDependency(writer, pattern.dependencies);
+            writer.field(L"type", pattern.type);
+            writer.endObject();
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    void writeFomodGroup(fluxora::JsonWriter& writer, const fluxora::FomodGroup& group)
+    {
+        writer.beginObject();
+        writer.field(L"id", group.id);
+        writer.field(L"name", group.name);
+        writer.field(L"type", group.type);
+        writer.key(L"options").beginArray();
+        for (const fluxora::FomodOption& option : group.options)
+        {
+            writeFomodOption(writer, option);
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    void writeFomodStep(fluxora::JsonWriter& writer, const fluxora::FomodStep& step)
+    {
+        writer.beginObject();
+        writer.field(L"id", step.id);
+        writer.field(L"name", step.name);
+        writer.key(L"visible");
+        if (step.visible.has_value())
+        {
+            writeFomodDependency(writer, step.visible.value());
+        }
+        else
+        {
+            writer.nullValue();
+        }
+        writer.key(L"groups").beginArray();
+        for (const fluxora::FomodGroup& group : step.groups)
+        {
+            writeFomodGroup(writer, group);
+        }
+        writer.endArray();
+        writer.endObject();
+    }
+
+    std::wstring serializeFomodInstaller(const fluxora::FomodInstallerDescriptor& descriptor)
+    {
+        fluxora::JsonWriter writer;
+        writer.beginObject();
+        writer.field(L"isFomod", descriptor.isFomod);
+        writer.field(L"moduleName", descriptor.moduleName);
+        writer.field(L"moduleVersion", descriptor.moduleVersion);
+        writer.field(L"moduleId", descriptor.moduleId);
+        writer.field(L"moduleImagePath", descriptor.moduleImagePath);
+        writer.field(L"memoryKey", descriptor.memoryKey);
+        writer.field(L"hasPreviousSelection", descriptor.hasPreviousSelection);
+        writer.stringArray(L"previousSelectedOptionIds", descriptor.previousSelectedOptionIds);
+        writer.key(L"fileDependencies").beginArray();
+        for (const fluxora::FomodFileDependencyState& dependency : descriptor.fileDependencyStates)
+        {
+            writeFomodFileDependencyState(writer, dependency);
+        }
+        writer.endArray();
+        writer.key(L"requiredFiles").beginArray();
+        for (const fluxora::FomodFileEntry& file : descriptor.requiredFiles)
+        {
+            writeFomodFileEntry(writer, file);
+        }
+        writer.endArray();
+        writer.key(L"steps").beginArray();
+        for (const fluxora::FomodStep& step : descriptor.steps)
+        {
+            writeFomodStep(writer, step);
+        }
+        writer.endArray();
+        writer.key(L"conditionalFilePatterns").beginArray();
+        for (const fluxora::FomodConditionalFilePattern& pattern : descriptor.conditionalFilePatterns)
+        {
+            writer.beginObject();
+            writer.key(L"dependencies");
+            writeFomodDependency(writer, pattern.dependencies);
+            writer.key(L"files").beginArray();
+            for (const fluxora::FomodFileEntry& file : pattern.files)
+            {
+                writeFomodFileEntry(writer, file);
+            }
+            writer.endArray();
+            writer.endObject();
+        }
+        writer.endArray();
         writer.endObject();
         return writer.str();
     }
@@ -511,6 +1455,39 @@ namespace
         return writer.str();
     }
 
+    std::wstring serializeFluxPackInstallProgress(const fluxora::FluxPackInstallProgress& progress)
+    {
+        fluxora::JsonWriter writer;
+        writer.beginObject();
+        writer.field(L"phase", progress.phase);
+        writer.field(L"currentStep", progress.currentStep);
+        writer.field(L"currentItem", progress.currentItem);
+        writer.field(L"statusMessage", progress.statusMessage);
+        writer.field(L"overallPercent", progress.overallPercent);
+        writer.field(L"totalSourceCount", progress.totalSourceCount);
+        writer.field(L"installedSourceCount", progress.installedSourceCount);
+        writer.field(L"pendingSourceCount", progress.pendingSourceCount);
+        writer.field(L"failedSourceCount", progress.failedSourceCount);
+        writer.key(L"providers").beginArray();
+        for (const fluxora::FluxPackProviderProgress& provider : progress.providers)
+        {
+            writer.beginObject();
+            writer.field(L"providerId", provider.providerId);
+            writer.field(L"displayName", provider.displayName);
+            writer.field(L"totalCount", provider.totalCount);
+            writer.field(L"completedCount", provider.completedCount);
+            writer.field(L"pendingCount", provider.pendingCount);
+            writer.field(L"failedCount", provider.failedCount);
+            writer.field(L"currentItem", provider.currentItem);
+            writer.field(L"statusText", provider.statusText);
+            writer.field(L"progressPercent", provider.progressPercent);
+            writer.endObject();
+        }
+        writer.endArray();
+        writer.endObject();
+        return writer.str();
+    }
+
     std::wstring serializeProjectDeleteProgress(const fluxora::ProjectDeleteProgress& progress)
     {
         fluxora::JsonWriter writer;
@@ -641,14 +1618,28 @@ namespace
         };
     }
 
-    fluxora::BuildTemplate resolveTemplateForPlugins(const wchar_t* templateId)
+    fluxora::PluginRuleContext resolvePluginRuleContextForTemplate(const wchar_t* templateId)
     {
         if (isBlank(templateId))
         {
             throw std::invalid_argument("Template id is required.");
         }
 
-        return core().templates().resolve(templateId);
+        const fluxora::GameSupportRegistry& registry = fluxora::GameSupportRegistry::embedded();
+        const fluxora::GameSupportLookupResult lookup = registry.lookupById(templateId);
+        if (!lookup.supported || lookup.support == nullptr)
+        {
+            throw std::invalid_argument("Plugin management is not supported by the selected game.");
+        }
+
+        const fluxora::GameSupportComponents& components = lookup.support->components();
+        return fluxora::PluginRuleContext{
+            components.pluginRulesProvider,
+            &lookup.support->capabilities(),
+            nullptr,
+            lookup.support->identity().defaultProfileName,
+            lookup.support->identity().id.value()
+        };
     }
 
     fluxora::Core& core()
@@ -666,6 +1657,85 @@ namespace
     bool isBlank(const wchar_t* value)
     {
         return value == nullptr || value[0] == L'\0';
+    }
+
+    std::string textForLog(std::wstring_view value)
+    {
+        if (value.empty())
+        {
+            return {};
+        }
+
+#ifdef _WIN32
+        const int requiredLength = WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.data(),
+            static_cast<int>(value.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        if (requiredLength > 0)
+        {
+            std::string out(static_cast<std::size_t>(requiredLength), '\0');
+            WideCharToMultiByte(
+                CP_UTF8,
+                0,
+                value.data(),
+                static_cast<int>(value.size()),
+                out.data(),
+                requiredLength,
+                nullptr,
+                nullptr);
+            return out;
+        }
+#endif
+
+        std::string fallback;
+        fallback.reserve(value.size());
+        for (wchar_t ch : value)
+        {
+            fallback.push_back(ch >= 0 && ch < 0x80 ? static_cast<char>(ch) : '?');
+        }
+        return fallback;
+    }
+
+    std::string pathForLog(const std::filesystem::path& path)
+    {
+        return textForLog(path.wstring());
+    }
+
+    bool tryParseExistingModInstallMode(int value, fluxora::ExistingModInstallMode& mode)
+    {
+        switch (value)
+        {
+        case 0:
+            mode = fluxora::ExistingModInstallMode::FailIfExists;
+            return true;
+        case 1:
+            mode = fluxora::ExistingModInstallMode::Replace;
+            return true;
+        case 2:
+            mode = fluxora::ExistingModInstallMode::Merge;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    const char* existingModInstallModeForLog(fluxora::ExistingModInstallMode mode)
+    {
+        switch (mode)
+        {
+        case fluxora::ExistingModInstallMode::Replace:
+            return "replace";
+        case fluxora::ExistingModInstallMode::Merge:
+            return "merge";
+        case fluxora::ExistingModInstallMode::FailIfExists:
+        default:
+            return "failIfExists";
+        }
     }
 
     std::wstring messageToWide(std::string_view message)
@@ -710,6 +1780,34 @@ namespace
                     level,
                     "NativeApi",
                     std::string("Unhandled native API exception: ") + exception.what());
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void logBridge(fluxora::LogLevel level, std::string_view message) noexcept
+    {
+        try
+        {
+            if (currentCore != nullptr && currentCore->logger().isInitialized())
+            {
+                currentCore->logger().write(fluxora::LogChannel::Bridge, level, "NativeApi", message);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void logOperation(fluxora::LogLevel level, std::string_view category, std::string_view message) noexcept
+    {
+        try
+        {
+            if (currentCore != nullptr && currentCore->logger().isInitialized())
+            {
+                currentCore->logger().writeOperation(level, category, message);
             }
         }
         catch (...)
@@ -764,9 +1862,63 @@ namespace
         lastError = messageToWide(std::string_view(message, std::strlen(message)));
         const bool isInvalidArgument = dynamic_cast<const std::invalid_argument*>(&exception) != nullptr;
         logApiException(isInvalidArgument ? fluxora::LogLevel::Warning : fluxora::LogLevel::Error, exception);
+        logBridge(
+            isInvalidArgument ? fluxora::LogLevel::Warning : fluxora::LogLevel::Error,
+            std::string("Native API call failed: ") + message);
+        logOperation(
+            isInvalidArgument ? fluxora::LogLevel::Warning : fluxora::LogLevel::Error,
+            "NativeApi",
+            std::string("Native operation failed: ") + message);
         return isInvalidArgument
             ? FluxoraCoreResultInvalidArgument
             : FluxoraCoreResultCoreError;
+    }
+
+    int installDownloadWithMode(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        const wchar_t* modName,
+        int existingModMode,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(projectDirectory) || isBlank(downloadPath) || isBlank(modName))
+            {
+                lastError = L"Project directory, download path, and mod name are required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            fluxora::ExistingModInstallMode mode = fluxora::ExistingModInstallMode::FailIfExists;
+            if (!tryParseExistingModInstallMode(existingModMode, mode))
+            {
+                lastError = L"Existing mod install mode is invalid.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            logBridge(fluxora::LogLevel::Info, "fluxora_install_download started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Install download requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\", modName=\"" +
+                    textForLog(modName) + "\", existingModMode=\"" +
+                    existingModInstallModeForLog(mode) + "\"");
+            const std::wstring json = serializeInstalledMod(
+                core().downloads().installDownload(
+                    std::filesystem::path(projectDirectory),
+                    std::filesystem::path(downloadPath),
+                    modName,
+                    mode));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Install download completed.");
+            return writeToBuffer(json, jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
     }
 }
 
@@ -784,6 +1936,20 @@ extern "C"
             mapException(exception);
             return 0;
         }
+    }
+
+    int fluxora_set_operation_context(const wchar_t* operationId)
+    {
+        if (isBlank(operationId))
+        {
+            fluxora::Logger::clearOperationId();
+        }
+        else
+        {
+            fluxora::Logger::setOperationId(operationId);
+        }
+
+        return FluxoraCoreResultOk;
     }
 
     int fluxora_preview_project_directory(
@@ -867,11 +2033,25 @@ extern "C"
                 std::filesystem::path(installRootDirectory)
             };
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_create_project started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Project",
+                std::string("Create project requested. name=\"") + textForLog(projectName) +
+                    "\", template=\"" + textForLog(templateId) +
+                    "\", gamePath=\"" + pathForLog(request.gamePath) +
+                    "\", installRoot=\"" + pathForLog(request.installRootDirectory) + "\"");
             const fluxora::ProjectDescriptor project = core().projects().createProject(request);
             const fluxora::ProjectOpenResult result{
                 project,
                 core().templates().resolve(project.templateId)
             };
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Project",
+                std::string("Create project completed. projectDirectory=\"") +
+                    pathForLog(project.projectDirectory) + "\", configPath=\"" +
+                    pathForLog(project.configPath) + "\"");
             return writeToBuffer(serializeOpenedProject(result), jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -940,9 +2120,22 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_rename_project started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Project",
+                std::string("Rename project requested. configPath=\"") +
+                    pathForLog(std::filesystem::path(configPath)) + "\", newName=\"" +
+                    textForLog(newName) + "\"");
             const fluxora::ProjectOpenResult result = core().projects().renameProject(
                 std::filesystem::path(configPath),
                 newName);
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Project",
+                std::string("Rename project completed. configPath=\"") +
+                    pathForLog(result.project.configPath) + "\", name=\"" +
+                    textForLog(result.project.name) + "\"");
             return writeToBuffer(serializeOpenedProject(result), jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -961,7 +2154,14 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_delete_project started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Project",
+                std::string("Delete project requested. configPath=\"") +
+                    pathForLog(std::filesystem::path(configPath)) + "\"");
             core().projects().deleteProject(std::filesystem::path(configPath));
+            logOperation(fluxora::LogLevel::Info, "Project", "Delete project completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -983,6 +2183,12 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_delete_project_with_progress started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Project",
+                std::string("Delete project requested. configPath=\"") +
+                    pathForLog(std::filesystem::path(configPath)) + "\"");
             fluxora::ProjectDeleteRequest request;
             request.configPath = std::filesystem::path(configPath);
             if (progressCallback != nullptr)
@@ -995,6 +2201,7 @@ extern "C"
             }
 
             core().projects().deleteProject(request);
+            logOperation(fluxora::LogLevel::Info, "Project", "Delete project completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -1040,11 +2247,116 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_save_build_path_settings started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "BuildPaths",
+                std::string("Save build path settings requested. configPath=\"") +
+                    pathForLog(std::filesystem::path(configPath)) + "\"");
             const fluxora::BuildPathSettings saved =
                 core().buildPathSettings().saveForConfig(
                     std::filesystem::path(configPath),
                     parseBuildPathSettingsJson(settingsJson));
+            logOperation(
+                fluxora::LogLevel::Info,
+                "BuildPaths",
+                std::string("Save build path settings completed. gameDirectory=\"") +
+                    pathForLog(saved.gameDirectory) + "\", modsDirectory=\"" +
+                    pathForLog(saved.modsDirectory) + "\", downloadsDirectory=\"" +
+                    pathForLog(saved.downloadsDirectory) + "\"");
             return writeToBuffer(serializeBuildPathSettings(saved), jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
+    }
+
+    int fluxora_export_fluxpack(
+        const wchar_t* configPath,
+        const wchar_t* outputPath,
+        int includeGeneratedAssets,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(configPath) || isBlank(outputPath))
+            {
+                lastError = L"Build config path and FluxPack output path are required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            logBridge(fluxora::LogLevel::Info, "fluxora_export_fluxpack started.");
+            const fluxora::FluxPackSummary summary = core().fluxPacks().exportProject(
+                fluxora::FluxPackExportRequest{
+                    std::filesystem::path(configPath),
+                    std::filesystem::path(outputPath),
+                    includeGeneratedAssets != 0
+                });
+            return writeToBuffer(serializeFluxPackSummary(summary), jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
+    }
+
+    int fluxora_inspect_fluxpack(
+        const wchar_t* fluxPackPath,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(fluxPackPath))
+            {
+                lastError = L"FluxPack path is required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            logBridge(fluxora::LogLevel::Info, "fluxora_inspect_fluxpack started.");
+            const fluxora::FluxPackSummary summary =
+                core().fluxPacks().inspectFluxPack(std::filesystem::path(fluxPackPath));
+            return writeToBuffer(serializeFluxPackSummary(summary), jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
+    }
+
+    int fluxora_install_fluxpack(
+        const wchar_t* fluxPackPath,
+        const wchar_t* installRootDirectory,
+        FluxoraCoreProgressCallback progressCallback,
+        void* progressUserData,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(fluxPackPath) || isBlank(installRootDirectory))
+            {
+                lastError = L"FluxPack path and install root directory are required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            logBridge(fluxora::LogLevel::Info, "fluxora_install_fluxpack started.");
+            const fluxora::FluxPackInstallResult result =
+                core().fluxPacks().installFluxPack(fluxora::FluxPackInstallRequest{
+                    std::filesystem::path(fluxPackPath),
+                    std::filesystem::path(installRootDirectory),
+                    [progressCallback, progressUserData](const fluxora::FluxPackInstallProgress& progress)
+                    {
+                        if (progressCallback != nullptr)
+                        {
+                            const std::wstring json = serializeFluxPackInstallProgress(progress);
+                            progressCallback(json.c_str(), progressUserData);
+                        }
+                    }
+                });
+            return writeToBuffer(serializeFluxPackInstallResult(result), jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
         {
@@ -1107,6 +2419,7 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_import_mod_organizer_instance started.");
             fluxora::ModOrganizerImportRequest request;
             request.sourceDirectory = std::filesystem::path(sourceDirectory);
             request.destinationRootDirectory = std::filesystem::path(destinationRootDirectory);
@@ -1116,6 +2429,14 @@ extern "C"
             request.mode = replaceExisting != 0
                 ? fluxora::ModOrganizerImportMode::ReplaceExisting
                 : fluxora::ModOrganizerImportMode::CreateNew;
+            logOperation(
+                fluxora::LogLevel::Info,
+                "MO2Import",
+                std::string("Mod Organizer import requested. source=\"") +
+                    pathForLog(request.sourceDirectory) + "\", destinationRoot=\"" +
+                    pathForLog(request.destinationRootDirectory) + "\", existingConfig=\"" +
+                    pathForLog(request.existingConfigPath) + "\", replaceExisting=" +
+                    (replaceExisting != 0 ? "true" : "false"));
             if (progressCallback != nullptr)
             {
                 request.progress = [progressCallback, progressUserData](const fluxora::ModOrganizerImportProgress& progress)
@@ -1127,6 +2448,12 @@ extern "C"
 
             const fluxora::ModOrganizerImportResult result =
                 core().modOrganizerImport().importInstance(request);
+            logOperation(
+                fluxora::LogLevel::Info,
+                "MO2Import",
+                std::string("Mod Organizer import completed. projectDirectory=\"") +
+                    pathForLog(result.project.project.projectDirectory) + "\", configPath=\"" +
+                    pathForLog(result.project.project.configPath) + "\"");
             return writeToBuffer(serializeOpenedProject(result.project), jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -1172,11 +2499,21 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_save_game_executables started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Executables",
+                std::string("Save executable list requested. configPath=\"") +
+                    pathForLog(std::filesystem::path(configPath)) + "\"");
             const std::vector<fluxora::GameExecutable> executables = parseGameExecutablesJson(executablesJson);
             const std::wstring json = serializeGameExecutables(
                 core().executables().saveProjectExecutables(
                     std::filesystem::path(configPath),
                     executables));
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Executables",
+                std::string("Save executable list completed. count=") + std::to_string(executables.size()));
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -1203,10 +2540,18 @@ extern "C"
             // sees the merged mod data directory, exactly like Mod Organizer 2.
             // The service transparently falls back to a plain launch when there
             // is nothing to virtualize.
+            logBridge(fluxora::LogLevel::Info, "fluxora_launch_game_executable started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Launch",
+                std::string("Launch executable requested. configPath=\"") +
+                    pathForLog(std::filesystem::path(configPath)) + "\", executableId=\"" +
+                    textForLog(executableId) + "\"");
             const std::wstring json = serializeGameExecutableLaunch(
                 core().virtualFileSystem().launchExecutable(
                     std::filesystem::path(configPath),
                     executableId));
+            logOperation(fluxora::LogLevel::Info, "Launch", "Launch executable completed.");
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -1481,9 +2826,17 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_delete_installed_mod started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Mods",
+                std::string("Delete installed mod requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", modPath=\"" +
+                    pathForLog(std::filesystem::path(modPath)) + "\"");
             core().mods().deleteInstalledMod(
                 std::filesystem::path(projectDirectory),
                 std::filesystem::path(modPath));
+            logOperation(fluxora::LogLevel::Info, "Mods", "Delete installed mod completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -1505,10 +2858,18 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Mods",
+                std::string("Set installed mod state requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", modPath=\"" +
+                    pathForLog(std::filesystem::path(modPath)) + "\", enabled=" +
+                    (isEnabled != 0 ? "true" : "false"));
             core().mods().setInstalledModEnabled(
                 std::filesystem::path(projectDirectory),
                 std::filesystem::path(modPath),
                 isEnabled != 0);
+            logOperation(fluxora::LogLevel::Info, "Mods", "Set installed mod state completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -1529,9 +2890,16 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Mods",
+                std::string("Set all installed mods state requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", enabled=" +
+                    (isEnabled != 0 ? "true" : "false"));
             core().mods().setAllInstalledModsEnabled(
                 std::filesystem::path(projectDirectory),
                 isEnabled != 0);
+            logOperation(fluxora::LogLevel::Info, "Mods", "Set all installed mods state completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -1606,10 +2974,10 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
-            const fluxora::BuildTemplate resolved = resolveTemplateForPlugins(templateId);
+            const fluxora::PluginRuleContext rules = resolvePluginRuleContextForTemplate(templateId);
             const std::wstring json = serializePlugins(core().plugins().listPlugins(
                 std::filesystem::path(projectDirectory),
-                resolved,
+                rules,
                 isBlank(profileName) ? L"" : profileName));
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
         }
@@ -1636,10 +3004,10 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
-            const fluxora::BuildTemplate resolved = resolveTemplateForPlugins(templateId);
+            const fluxora::PluginRuleContext rules = resolvePluginRuleContextForTemplate(templateId);
             const std::wstring json = serializePlugins(core().plugins().movePlugin(
                 std::filesystem::path(projectDirectory),
-                resolved,
+                rules,
                 isBlank(profileName) ? L"" : profileName,
                 orderItemId,
                 targetIndex));
@@ -1668,10 +3036,10 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
-            const fluxora::BuildTemplate resolved = resolveTemplateForPlugins(templateId);
+            const fluxora::PluginRuleContext rules = resolvePluginRuleContextForTemplate(templateId);
             const std::wstring json = serializePlugins(core().plugins().createPluginSeparator(
                 std::filesystem::path(projectDirectory),
-                resolved,
+                rules,
                 isBlank(profileName) ? L"" : profileName,
                 title,
                 targetIndex));
@@ -1699,10 +3067,10 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
-            const fluxora::BuildTemplate resolved = resolveTemplateForPlugins(templateId);
+            const fluxora::PluginRuleContext rules = resolvePluginRuleContextForTemplate(templateId);
             const std::wstring json = serializePlugins(core().plugins().deletePluginSeparator(
                 std::filesystem::path(projectDirectory),
-                resolved,
+                rules,
                 isBlank(profileName) ? L"" : profileName,
                 separatorId));
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
@@ -1730,10 +3098,10 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
-            const fluxora::BuildTemplate resolved = resolveTemplateForPlugins(templateId);
+            const fluxora::PluginRuleContext rules = resolvePluginRuleContextForTemplate(templateId);
             const std::wstring json = serializePlugins(core().plugins().setPluginEnabled(
                 std::filesystem::path(projectDirectory),
-                resolved,
+                rules,
                 isBlank(profileName) ? L"" : profileName,
                 pluginName,
                 isEnabled != 0));
@@ -1800,9 +3168,17 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_delete_download started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Delete download requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\"");
             core().downloads().deleteDownload(
                 std::filesystem::path(projectDirectory),
                 std::filesystem::path(downloadPath));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Delete download completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -1823,9 +3199,16 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Cancel download requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\"");
             core().downloads().cancelDownload(
                 std::filesystem::path(projectDirectory),
                 std::filesystem::path(downloadPath));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Cancel download completed.");
             return FluxoraCoreResultOk;
         }
         catch (const std::exception& exception)
@@ -1848,9 +3231,16 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Resume download requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\"");
             const fluxora::DownloadEntry download = core().downloads().resumeDownload(
                 std::filesystem::path(projectDirectory),
                 std::filesystem::path(downloadPath));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Resume download completed.");
             return writeToBuffer(serializeDownload(download), jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -1872,8 +3262,14 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Import inbound downloads requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\"");
             const std::wstring json = serializeDownloads(
                 core().downloads().importInboundNxmLinks(std::filesystem::path(projectDirectory)));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Import inbound downloads completed.");
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -1896,10 +3292,18 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            logBridge(fluxora::LogLevel::Info, "fluxora_import_download_file started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Import download file requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", sourcePath=\"" +
+                    pathForLog(std::filesystem::path(sourcePath)) + "\"");
             const std::wstring json = serializeDownload(
                 core().downloads().importLocalFile(
                     std::filesystem::path(projectDirectory),
                     std::filesystem::path(sourcePath)));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Import download file completed.");
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)
@@ -1915,6 +3319,167 @@ extern "C"
         wchar_t* jsonBuffer,
         int jsonBufferLength)
     {
+        return installDownloadWithMode(
+            projectDirectory,
+            downloadPath,
+            modName,
+            0,
+            jsonBuffer,
+            jsonBufferLength);
+    }
+
+    int fluxora_install_download_with_mode(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        const wchar_t* modName,
+        int existingModMode,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        return installDownloadWithMode(
+            projectDirectory,
+            downloadPath,
+            modName,
+            existingModMode,
+            jsonBuffer,
+            jsonBufferLength);
+    }
+
+    int fluxora_analyze_download_content_layout(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        int existingModMode,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(projectDirectory) || isBlank(downloadPath))
+            {
+                lastError = L"Project directory and download path are required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            fluxora::ExistingModInstallMode mode = fluxora::ExistingModInstallMode::FailIfExists;
+            if (!tryParseExistingModInstallMode(existingModMode, mode))
+            {
+                lastError = L"Existing mod install mode is invalid.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            logBridge(fluxora::LogLevel::Info, "fluxora_analyze_download_content_layout started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Analyze download content layout requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\", existingModMode=\"" +
+                    existingModInstallModeForLog(mode) + "\"");
+            const std::wstring json = serializePlacementPlan(
+                core().downloads().analyzeDownloadContentLayout(
+                    std::filesystem::path(projectDirectory),
+                    std::filesystem::path(downloadPath),
+                    mode));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Analyze download content layout completed.");
+            return writeToBuffer(json, jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
+    }
+
+    int fluxora_analyze_fomod_download(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(projectDirectory) || isBlank(downloadPath))
+            {
+                lastError = L"Project directory and download path are required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            logBridge(fluxora::LogLevel::Info, "fluxora_analyze_fomod_download started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Analyze FOMOD download requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\"");
+            const std::wstring json = serializeFomodInstaller(
+                core().downloads().analyzeFomodDownload(
+                    std::filesystem::path(projectDirectory),
+                    std::filesystem::path(downloadPath)));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Analyze FOMOD download completed.");
+            return writeToBuffer(json, jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
+    }
+
+    int fluxora_analyze_fomod_download_content_layout(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        int existingModMode,
+        const wchar_t* selectedOptionIdsJson,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
+        try
+        {
+            if (isBlank(projectDirectory) || isBlank(downloadPath))
+            {
+                lastError = L"Project directory and download path are required.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            fluxora::ExistingModInstallMode mode = fluxora::ExistingModInstallMode::FailIfExists;
+            if (!tryParseExistingModInstallMode(existingModMode, mode))
+            {
+                lastError = L"Existing mod install mode is invalid.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            const std::vector<std::wstring> selectedOptionIds = parseStringArrayJson(selectedOptionIdsJson);
+            logBridge(fluxora::LogLevel::Info, "fluxora_analyze_fomod_download_content_layout started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Analyze FOMOD content layout requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\", existingModMode=\"" +
+                    existingModInstallModeForLog(mode) + "\", selectedOptionCount=" +
+                    std::to_string(selectedOptionIds.size()));
+            const std::wstring json = serializePlacementPlan(
+                core().downloads().analyzeFomodDownloadContentLayout(
+                    std::filesystem::path(projectDirectory),
+                    std::filesystem::path(downloadPath),
+                    mode,
+                    selectedOptionIds));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Analyze FOMOD content layout completed.");
+            return writeToBuffer(json, jsonBuffer, jsonBufferLength);
+        }
+        catch (const std::exception& exception)
+        {
+            return mapException(exception);
+        }
+    }
+
+    int fluxora_install_fomod_download_with_mode(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        const wchar_t* modName,
+        int existingModMode,
+        const wchar_t* selectedOptionIdsJson,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength)
+    {
         try
         {
             if (isBlank(projectDirectory) || isBlank(downloadPath) || isBlank(modName))
@@ -1923,11 +3488,32 @@ extern "C"
                 return FluxoraCoreResultInvalidArgument;
             }
 
+            fluxora::ExistingModInstallMode mode = fluxora::ExistingModInstallMode::FailIfExists;
+            if (!tryParseExistingModInstallMode(existingModMode, mode))
+            {
+                lastError = L"Existing mod install mode is invalid.";
+                return FluxoraCoreResultInvalidArgument;
+            }
+
+            const std::vector<std::wstring> selectedOptionIds = parseStringArrayJson(selectedOptionIdsJson);
+            logBridge(fluxora::LogLevel::Info, "fluxora_install_fomod_download started.");
+            logOperation(
+                fluxora::LogLevel::Info,
+                "Downloads",
+                std::string("Install FOMOD download requested. projectDirectory=\"") +
+                    pathForLog(std::filesystem::path(projectDirectory)) + "\", downloadPath=\"" +
+                    pathForLog(std::filesystem::path(downloadPath)) + "\", modName=\"" +
+                    textForLog(modName) + "\", existingModMode=\"" +
+                    existingModInstallModeForLog(mode) + "\", selectedOptionCount=" +
+                    std::to_string(selectedOptionIds.size()));
             const std::wstring json = serializeInstalledMod(
-                core().downloads().installDownload(
+                core().downloads().installFomodDownload(
                     std::filesystem::path(projectDirectory),
                     std::filesystem::path(downloadPath),
-                    modName));
+                    modName,
+                    mode,
+                    selectedOptionIds));
+            logOperation(fluxora::LogLevel::Info, "Downloads", "Install FOMOD download completed.");
             return writeToBuffer(json, jsonBuffer, jsonBufferLength);
         }
         catch (const std::exception& exception)

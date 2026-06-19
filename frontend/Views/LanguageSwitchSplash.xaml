@@ -2,6 +2,12 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              IsHitTestVisible="{Binding IsLanguageSwitching}"
+             FontFamily="{StaticResource FluxoraFontBody}"
+             FontWeight="Medium"
+             TextOptions.TextFormattingMode="Display"
+             TextOptions.TextRenderingMode="ClearType"
+             TextOptions.TextHintingMode="Fixed"
+             RenderOptions.ClearTypeHint="Enabled"
              SnapsToDevicePixels="True"
              UseLayoutRounding="True">
     <UserControl.Resources>

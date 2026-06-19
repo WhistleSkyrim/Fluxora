@@ -56,7 +56,10 @@ public sealed class ModOrderDragDropService
     public void Attach()
     {
         dataGrid.AllowDrop = true;
-        dataGrid.PreviewMouseLeftButtonDown += OnPreviewMouseLeftButtonDown;
+        dataGrid.AddHandler(
+            Mouse.PreviewMouseDownEvent,
+            new MouseButtonEventHandler(OnPreviewMouseLeftButtonDown),
+            true);
         dataGrid.PreviewMouseLeftButtonUp += OnPreviewMouseLeftButtonUp;
         dataGrid.MouseMove += OnMouseMove;
         dataGrid.DragOver += OnDragOver;
@@ -74,19 +77,27 @@ public sealed class ModOrderDragDropService
 
     private void OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (IsDragBlockedByInteractiveElement(e.OriginalSource as DependencyObject))
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        if (SelectionInputService.HasRangeSelectionModifier(Keyboard.Modifiers) ||
+            IsDragBlockedByInteractiveElement(e.OriginalSource as DependencyObject))
         {
             draggedRow = null;
             dragStartPoint = null;
             return;
         }
 
-        if (FindVisualParent<DataGridRow>(e.OriginalSource as DependencyObject) is { Item: ModEntry mod } row &&
-            canStartDrag(mod))
+        if (FindVisualParent<DataGridRow>(e.OriginalSource as DependencyObject) is { Item: ModEntry mod } row)
         {
-            draggedRow = row;
-            dragStartPoint = e.GetPosition(dataGrid);
-            dataGrid.SelectedItem = mod;
+            if (canStartDrag(mod))
+            {
+                draggedRow = row;
+                dragStartPoint = e.GetPosition(dataGrid);
+            }
+
             return;
         }
 
@@ -502,7 +513,6 @@ public sealed class ModOrderDragDropService
             TranslateTransform translate = EnsureTranslateTransform(row);
             translate.BeginAnimation(TranslateTransform.YProperty, null);
             translate.Y = deltaY;
-            row.CacheMode = new BitmapCache();
 
             DoubleAnimation animation = new(0, new Duration(ReorderAnimationDuration))
             {
@@ -511,7 +521,6 @@ public sealed class ModOrderDragDropService
             animation.Completed += (_, _) =>
             {
                 translate.Y = 0;
-                row.CacheMode = null;
             };
             translate.BeginAnimation(TranslateTransform.YProperty, animation, HandoffBehavior.SnapshotAndReplace);
             ++animatedRows;
@@ -680,4 +689,5 @@ public sealed class ModOrderDragDropService
     {
         return string.IsNullOrWhiteSpace(mod.OrderId) ? mod.Id : mod.OrderId;
     }
+
 }

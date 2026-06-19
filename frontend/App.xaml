@@ -9,23 +9,36 @@
 
             <!-- Brand typography. Embedded TTFs (see Fonts/), full Latin + Cyrillic + German
                  so RU/EN/DE render in-brand. Segoe kept as graceful fallback.
-                 Body   : Onest     — modern grotesque, excellent UI legibility.
-                 Display: Unbounded — expressive headings / titles. -->
+                 Onest keeps the original Fluxora feel while avoiding the old ultra-wide
+                 display face on dense UI text. -->
             <FontFamily x:Key="FluxoraFontBody">./Fonts/#Onest, Segoe UI Variable, Segoe UI</FontFamily>
-            <FontFamily x:Key="FluxoraFontDisplay">./Fonts/#Unbounded, Segoe UI Variable, Segoe UI</FontFamily>
+            <FontFamily x:Key="FluxoraFontDisplay">./Fonts/#Onest, Segoe UI Variable, Segoe UI</FontFamily>
 
-            <!-- Typographic system: the heaviest weight is the brand "voice" and is
-                 rendered in the display face (Unbounded); everything else stays in
-                 the body face (Onest). This implicit style promotes every heading
-                 (FontWeight="Black") to the display face automatically. Icon glyphs and
-                 list rows set FontFamily / Style locally, which outranks this trigger,
-                 so they are untouched. -->
+            <!-- Keep text rendered as text: fixed hinting, ClearType, and pixel snapping
+                 favor sharp small UI labels over bitmap-like scaling artifacts. -->
             <Style TargetType="{x:Type TextBlock}">
+                <Setter Property="FontFamily" Value="{StaticResource FluxoraFontBody}" />
+                <Setter Property="FontWeight" Value="Medium" />
+                <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+                <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
+                <Setter Property="TextOptions.TextHintingMode" Value="Fixed" />
+                <Setter Property="RenderOptions.ClearTypeHint" Value="Enabled" />
+                <Setter Property="SnapsToDevicePixels" Value="True" />
                 <Style.Triggers>
                     <Trigger Property="FontWeight" Value="Black">
                         <Setter Property="FontFamily" Value="{StaticResource FluxoraFontDisplay}" />
                     </Trigger>
                 </Style.Triggers>
+            </Style>
+
+            <Style TargetType="{x:Type Button}">
+                <Setter Property="FontFamily" Value="{StaticResource FluxoraFontBody}" />
+                <Setter Property="FontWeight" Value="Bold" />
+                <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+                <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
+                <Setter Property="TextOptions.TextHintingMode" Value="Fixed" />
+                <Setter Property="RenderOptions.ClearTypeHint" Value="Enabled" />
+                <Setter Property="SnapsToDevicePixels" Value="True" />
             </Style>
         </ResourceDictionary>
     </Application.Resources>

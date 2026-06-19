@@ -44,8 +44,9 @@ public sealed class ProjectWorkspaceLoadService : IAppService
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            ProjectWorkspaceLoadSection<PluginEntry> plugins =
-                await CaptureAsync(token => pluginCatalogService.GetPluginsAsync(project, profileName, token), cancellationToken);
+            ProjectWorkspaceLoadSection<PluginEntry> plugins = ShouldRequestPluginSection(project)
+                ? await CaptureAsync(token => pluginCatalogService.GetPluginsAsync(project, profileName, token), cancellationToken)
+                : ProjectWorkspaceLoadSection<PluginEntry>.Success(Array.Empty<PluginEntry>());
 
             ProjectWorkspaceLoadSection<DownloadEntry>? downloads = downloadsTask is null
                 ? null
@@ -73,10 +74,16 @@ public sealed class ProjectWorkspaceLoadService : IAppService
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        ProjectWorkspaceLoadSection<PluginEntry> plugins =
-            await CaptureAsync(token => pluginCatalogService.GetPluginsAsync(project, profileName, token), cancellationToken);
+        ProjectWorkspaceLoadSection<PluginEntry> plugins = ShouldRequestPluginSection(project)
+            ? await CaptureAsync(token => pluginCatalogService.GetPluginsAsync(project, profileName, token), cancellationToken)
+            : ProjectWorkspaceLoadSection<PluginEntry>.Success(Array.Empty<PluginEntry>());
 
         return new ProjectWorkspaceProfileLoadResult(mods, plugins);
+    }
+
+    internal static bool ShouldRequestPluginSection(ModProject project)
+    {
+        return GameCapabilityResolver.ForProject(project).SupportsPluginSection;
     }
 
     private static async Task<ProjectWorkspaceLoadSection<T>> CaptureAsync<T>(

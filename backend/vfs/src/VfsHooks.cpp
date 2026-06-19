@@ -2,6 +2,7 @@
 
 #include "FluxoraVfs/NtApi.hpp"
 #include "FluxoraVfs/VfsLog.hpp"
+#include "FluxoraVfs/VfsProtocol.hpp"
 #include "FluxoraVfs/VfsTree.hpp"
 
 #include <detours.h>
@@ -10,6 +11,7 @@
 #include <cstddef>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -26,10 +28,12 @@ namespace fluxora::vfs
             VfsTree tree;
             std::wstring targetLower;
             std::wstring overwrite;
+            std::vector<std::wstring> excludedRootNames;
         };
 
         std::vector<RuntimeMount> g_mounts;
         std::string g_hookDllAnsi;
+        std::wstring g_configPath;
 
         // Re-entrancy guard. While a hook is doing its work it inevitably calls
         // back into the very APIs it hooks (GetFileAttributes, CopyFile, ...).
@@ -50,6 +54,8 @@ namespace fluxora::vfs
         NtQueryFullAttributesFileFn Real_NtQueryFullAttributesFile = nullptr;
         NtQueryDirectoryFileFn Real_NtQueryDirectoryFile = nullptr;
         NtQueryDirectoryFileExFn Real_NtQueryDirectoryFileEx = nullptr;
+        NtSetInformationFileFn Real_NtSetInformationFile = nullptr;
+        NtDeleteFileFn Real_NtDeleteFile = nullptr;
         NtCloseFn Real_NtClose = nullptr;
         decltype(&CreateProcessW) Real_CreateProcessW = CreateProcessW;
         decltype(&CreateProcessA) Real_CreateProcessA = CreateProcessA;
@@ -70,6 +76,14 @@ namespace fluxora::vfs
         std::mutex g_dirMutex;
         std::unordered_map<HANDLE, DirEnumState> g_dirStates;
 
+        struct FileState
+        {
+            std::size_t mountIndex = 0;
+            std::wstring relLower;
+        };
+
+        std::unordered_map<HANDLE, FileState> g_fileStates;
+
         // --- small path helpers --------------------------------------------
         std::wstring joinPath(const std::wstring& base, const std::wstring& leaf)
         {
@@ -89,6 +103,111 @@ namespace fluxora::vfs
             return out;
         }
 
+        char toLowerAscii(char value)
+        {
+            return value >= 'A' && value <= 'Z'
+                ? static_cast<char>(value - 'A' + 'a')
+                : value;
+        }
+
+        bool equalsIgnoreCaseAscii(std::string_view left, std::string_view right)
+        {
+            if (left.size() != right.size())
+            {
+                return false;
+            }
+
+            for (std::size_t index = 0; index < left.size(); ++index)
+            {
+                if (toLowerAscii(left[index]) != toLowerAscii(right[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        bool isEnvironmentEntryForName(const std::wstring& entry, std::wstring_view name)
+        {
+            const std::size_t searchFrom = !entry.empty() && entry.front() == L'=' ? 1 : 0;
+            const std::size_t separator = entry.find(L'=', searchFrom);
+            return separator == name.size() &&
+                VfsTree::toLower(entry.substr(0, separator)) == VfsTree::toLower(std::wstring(name));
+        }
+
+        bool isEnvironmentEntryForName(const std::string& entry, std::string_view name)
+        {
+            const std::size_t searchFrom = !entry.empty() && entry.front() == '=' ? 1 : 0;
+            const std::size_t separator = entry.find('=', searchFrom);
+            return separator == name.size() &&
+                equalsIgnoreCaseAscii(std::string_view(entry.data(), separator), name);
+        }
+
+        std::vector<wchar_t> environmentBlockWithConfig(const wchar_t* environment)
+        {
+            std::vector<wchar_t> block;
+            if (environment == nullptr || g_configPath.empty())
+            {
+                return block;
+            }
+
+            const std::wstring variableName = protocol::configEnvironmentVariable;
+            const std::wstring assignment = variableName + L"=" + g_configPath;
+            bool wroteConfig = false;
+            const wchar_t* cursor = environment;
+            while (*cursor != L'\0')
+            {
+                const std::wstring entry(cursor);
+                const bool isConfigEntry = isEnvironmentEntryForName(entry, variableName);
+                const std::wstring& output = isConfigEntry ? assignment : entry;
+                wroteConfig = wroteConfig || isConfigEntry;
+                block.insert(block.end(), output.begin(), output.end());
+                block.push_back(L'\0');
+                cursor += entry.size() + 1;
+            }
+
+            if (!wroteConfig)
+            {
+                block.insert(block.end(), assignment.begin(), assignment.end());
+                block.push_back(L'\0');
+            }
+            block.push_back(L'\0');
+            return block;
+        }
+
+        std::vector<char> environmentBlockWithConfig(const char* environment)
+        {
+            std::vector<char> block;
+            if (environment == nullptr || g_configPath.empty())
+            {
+                return block;
+            }
+
+            const std::string variableName = toAnsi(protocol::configEnvironmentVariable);
+            const std::string assignment = variableName + "=" + toAnsi(g_configPath);
+            bool wroteConfig = false;
+            const char* cursor = environment;
+            while (*cursor != '\0')
+            {
+                const std::string entry(cursor);
+                const bool isConfigEntry = isEnvironmentEntryForName(entry, variableName);
+                const std::string& output = isConfigEntry ? assignment : entry;
+                wroteConfig = wroteConfig || isConfigEntry;
+                block.insert(block.end(), output.begin(), output.end());
+                block.push_back('\0');
+                cursor += entry.size() + 1;
+            }
+
+            if (!wroteConfig)
+            {
+                block.insert(block.end(), assignment.begin(), assignment.end());
+                block.push_back('\0');
+            }
+            block.push_back('\0');
+            return block;
+        }
+
         std::wstring stripNtPrefix(std::wstring path)
         {
             if (path.rfind(L"\\??\\", 0) == 0 || path.rfind(L"\\\\?\\", 0) == 0)
@@ -96,6 +215,131 @@ namespace fluxora::vfs
                 path.erase(0, 4);
             }
             return path;
+        }
+
+        bool isAbsoluteObjectName(const std::wstring& objectName)
+        {
+            return objectName.rfind(L"\\??\\", 0) == 0 ||
+                objectName.rfind(L"\\\\?\\", 0) == 0 ||
+                (objectName.size() >= 2 && objectName[1] == L':');
+        }
+
+        std::wstring relativeObjectName(std::wstring objectName)
+        {
+            while (!objectName.empty() && (objectName.front() == L'\\' || objectName.front() == L'/'))
+            {
+                objectName.erase(objectName.begin());
+            }
+            return objectName;
+        }
+
+        std::vector<std::wstring> normalizedExcludedRootNames(const std::vector<std::wstring>& names)
+        {
+            std::vector<std::wstring> excluded;
+            excluded.reserve(names.size());
+            for (const std::wstring& name : names)
+            {
+                const std::wstring normalized = VfsTree::normalizeRel(name);
+                if (!normalized.empty() && normalized.find(L'\\') == std::wstring::npos)
+                {
+                    excluded.push_back(VfsTree::toLower(normalized));
+                }
+            }
+            return excluded;
+        }
+
+        bool isExcludedRelativePath(const RuntimeMount& mount, const std::wstring& relLower)
+        {
+            if (relLower.empty())
+            {
+                return false;
+            }
+
+            const std::size_t separator = relLower.find(L'\\');
+            const std::wstring_view first = separator == std::wstring::npos
+                ? std::wstring_view(relLower)
+                : std::wstring_view(relLower.data(), separator);
+            return std::find(
+                mount.excludedRootNames.begin(),
+                mount.excludedRootNames.end(),
+                first) != mount.excludedRootNames.end();
+        }
+
+        std::wstring parentRelLower(const std::wstring& relLower);
+
+        bool virtualDosPathFromTrackedDirectoryHandle(
+            POBJECT_ATTRIBUTES attributes,
+            const std::wstring& objectName,
+            std::wstring& dosPath)
+        {
+            if (attributes == nullptr ||
+                attributes->RootDirectory == nullptr ||
+                isAbsoluteObjectName(objectName))
+            {
+                return false;
+            }
+
+            std::size_t mountIndex = 0;
+            std::wstring rootRelLower;
+            {
+                std::scoped_lock lock(g_dirMutex);
+                const auto state = g_dirStates.find(attributes->RootDirectory);
+                if (state == g_dirStates.end())
+                {
+                    return false;
+                }
+
+                mountIndex = state->second.mountIndex;
+                rootRelLower = state->second.relLower;
+            }
+
+            if (mountIndex >= g_mounts.size())
+            {
+                return false;
+            }
+
+            const RuntimeMount& mount = g_mounts[mountIndex];
+            const std::wstring virtualRoot = rootRelLower.empty()
+                ? mount.tree.target()
+                : joinPath(mount.tree.target(), rootRelLower);
+            const std::wstring leaf = relativeObjectName(objectName);
+            dosPath = leaf.empty() ? virtualRoot : joinPath(virtualRoot, leaf);
+            return true;
+        }
+
+        bool virtualDosPathFromTrackedFileHandle(
+            HANDLE handle,
+            const std::wstring& objectName,
+            std::wstring& dosPath)
+        {
+            if (handle == nullptr || handle == INVALID_HANDLE_VALUE || isAbsoluteObjectName(objectName))
+            {
+                return false;
+            }
+
+            FileState fileState;
+            {
+                std::scoped_lock lock(g_dirMutex);
+                const auto state = g_fileStates.find(handle);
+                if (state == g_fileStates.end())
+                {
+                    return false;
+                }
+
+                fileState = state->second;
+            }
+
+            if (fileState.mountIndex >= g_mounts.size())
+            {
+                return false;
+            }
+
+            const RuntimeMount& mount = g_mounts[fileState.mountIndex];
+            const std::wstring parent = parentRelLower(fileState.relLower);
+            const std::wstring leaf = relativeObjectName(objectName);
+            const std::wstring targetRel = parent.empty() ? leaf : joinPath(parent, leaf);
+            dosPath = targetRel.empty() ? mount.tree.target() : joinPath(mount.tree.target(), targetRel);
+            return true;
         }
 
         // Resolve the absolute DOS path an OBJECT_ATTRIBUTES refers to. Handles
@@ -111,6 +355,11 @@ namespace fluxora::vfs
             const std::wstring objectName(
                 attributes->ObjectName->Buffer,
                 attributes->ObjectName->Length / sizeof(wchar_t));
+
+            if (virtualDosPathFromTrackedDirectoryHandle(attributes, objectName, dosPath))
+            {
+                return true;
+            }
 
             if (attributes->RootDirectory != nullptr)
             {
@@ -131,11 +380,7 @@ namespace fluxora::vfs
                     return false;
                 }
 
-                std::wstring leaf = objectName;
-                while (!leaf.empty() && (leaf.front() == L'\\' || leaf.front() == L'/'))
-                {
-                    leaf.erase(leaf.begin());
-                }
+                std::wstring leaf = relativeObjectName(objectName);
                 dosPath = leaf.empty() ? root : root + L"\\" + leaf;
                 return true;
             }
@@ -179,6 +424,12 @@ namespace fluxora::vfs
                     lower.compare(0, targetLower.size(), targetLower) == 0 &&
                     lower[targetLower.size()] == L'\\')
                 {
+                    const std::wstring relLower = lower.substr(targetLower.size() + 1);
+                    if (isExcludedRelativePath(g_mounts[index], relLower))
+                    {
+                        continue;
+                    }
+
                     match.mountIndex = index;
                     match.rel = dosPath.substr(targetLower.size() + 1);
                     return true;
@@ -205,6 +456,39 @@ namespace fluxora::vfs
                 }
             }
             CreateDirectoryW(directory.c_str(), nullptr);
+        }
+
+        std::wstring parentRelLower(const std::wstring& relLower)
+        {
+            const std::size_t slash = relLower.find_last_of(L'\\');
+            return slash == std::wstring::npos ? std::wstring() : relLower.substr(0, slash);
+        }
+
+        bool hasDirectoryAttribute(const std::wstring& path)
+        {
+            if (path.empty())
+            {
+                return false;
+            }
+
+            const DWORD attributes = GetFileAttributesW(path.c_str());
+            return attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        }
+
+        std::wstring overwritePathForRel(const RuntimeMount& mount, const std::wstring& rel)
+        {
+            if (mount.overwrite.empty())
+            {
+                return {};
+            }
+
+            return rel.empty() ? mount.overwrite : joinPath(mount.overwrite, rel);
+        }
+
+        bool overwriteDirectoryExists(const RuntimeMount& mount, const std::wstring& relLower)
+        {
+            return hasDirectoryAttribute(overwritePathForRel(mount, relLower));
         }
 
         bool dispositionCreates(ULONG disposition)
@@ -264,7 +548,8 @@ namespace fluxora::vfs
             std::size_t mountIndex,
             const std::wstring& rel,
             ULONG disposition,
-            bool writeAccess)
+            bool writeAccess,
+            bool directoryOpen)
         {
             const RuntimeMount& mount = g_mounts[mountIndex];
             const std::wstring relN = VfsTree::normalizeRel(rel);
@@ -273,11 +558,11 @@ namespace fluxora::vfs
 
             OpenDecision decision;
             decision.mountIndex = mountIndex;
+            decision.relLower = relLower;
             switch (info.kind)
             {
             case VfsTree::PathInfo::Kind::Directory:
                 decision.registerMerge = true;
-                decision.relLower = relLower;
                 if (!info.directoryRealExists)
                 {
                     decision.redirect = true;
@@ -300,7 +585,7 @@ namespace fluxora::vfs
 
             case VfsTree::PathInfo::Kind::Unknown:
             default:
-                if (!mount.overwrite.empty() && info.parentVirtual)
+                if (!mount.overwrite.empty())
                 {
                     const std::wstring candidate = joinPath(mount.overwrite, relN);
                     const DWORD attributes = GetFileAttributesW(candidate.c_str());
@@ -308,13 +593,31 @@ namespace fluxora::vfs
                     {
                         decision.redirect = true;
                         decision.path = candidate;
+                        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                        {
+                            decision.registerMerge = true;
+                        }
                         return decision;
                     }
 
                     if (dispositionCreates(disposition) || writeAccess)
                     {
+                        const std::wstring realCandidate = joinPath(mount.tree.target(), relN);
+                        const DWORD realAttributes = GetFileAttributesW(realCandidate.c_str());
+                        const bool realFileExists =
+                            realAttributes != INVALID_FILE_ATTRIBUTES &&
+                            (realAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
                         decision.redirect = true;
-                        decision.path = writeRedirect(mount, relN, false, std::wstring(), disposition);
+                        decision.path = writeRedirect(
+                            mount,
+                            relN,
+                            realFileExists,
+                            realFileExists ? realCandidate : std::wstring(),
+                            disposition);
+                        if (directoryOpen)
+                        {
+                            decision.registerMerge = true;
+                        }
                     }
                 }
                 return decision;
@@ -365,8 +668,18 @@ namespace fluxora::vfs
         {
             if (handle == nullptr ||
                 handle == INVALID_HANDLE_VALUE ||
-                mountIndex >= g_mounts.size() ||
-                !g_mounts[mountIndex].tree.isVirtualDir(relLower))
+                mountIndex >= g_mounts.size())
+            {
+                return;
+            }
+
+            const RuntimeMount& mount = g_mounts[mountIndex];
+            if (isExcludedRelativePath(mount, relLower))
+            {
+                return;
+            }
+
+            if (!mount.tree.isVirtualDir(relLower) && !overwriteDirectoryExists(mount, relLower))
             {
                 return;
             }
@@ -378,59 +691,35 @@ namespace fluxora::vfs
             g_dirStates[handle] = std::move(state);
         }
 
+        void registerFileHandle(HANDLE handle, std::size_t mountIndex, const std::wstring& relLower)
+        {
+            if (handle == nullptr || handle == INVALID_HANDLE_VALUE || mountIndex >= g_mounts.size())
+            {
+                return;
+            }
+
+            std::scoped_lock lock(g_dirMutex);
+            g_fileStates[handle] = FileState{mountIndex, relLower};
+        }
+
         void unregisterDirectoryHandle(HANDLE handle)
         {
             std::scoped_lock lock(g_dirMutex);
             g_dirStates.erase(handle);
+            g_fileStates.erase(handle);
         }
 
         void clearRuntimeState()
         {
             std::scoped_lock lock(g_dirMutex);
             g_dirStates.clear();
+            g_fileStates.clear();
             g_mounts.clear();
             g_hookDllAnsi.clear();
+            g_configPath.clear();
         }
 
         // --- directory enumeration synthesis -------------------------------
-        bool wildcardMatch(const std::wstring& name, const std::wstring& pattern)
-        {
-            // Classic iterative '*' / '?' matcher over lowercase strings.
-            std::size_t n = 0;
-            std::size_t p = 0;
-            std::size_t star = std::wstring::npos;
-            std::size_t mark = 0;
-
-            while (n < name.size())
-            {
-                if (p < pattern.size() && (pattern[p] == name[n] || pattern[p] == L'?'))
-                {
-                    ++n;
-                    ++p;
-                }
-                else if (p < pattern.size() && pattern[p] == L'*')
-                {
-                    star = p++;
-                    mark = n;
-                }
-                else if (star != std::wstring::npos)
-                {
-                    p = star + 1;
-                    n = ++mark;
-                }
-                else
-                {
-                    return false;
-                }
-            }
-
-            while (p < pattern.size() && pattern[p] == L'*')
-            {
-                ++p;
-            }
-            return p == pattern.size();
-        }
-
         DirChild makeDotEntry(const std::wstring& name)
         {
             DirChild dot;
@@ -438,6 +727,129 @@ namespace fluxora::vfs
             dot.isDirectory = true;
             dot.attributes = FILE_ATTRIBUTE_DIRECTORY;
             return dot;
+        }
+
+        LARGE_INTEGER toLargeInteger(const FILETIME& time)
+        {
+            LARGE_INTEGER value{};
+            value.LowPart = time.dwLowDateTime;
+            value.HighPart = static_cast<LONG>(time.dwHighDateTime);
+            return value;
+        }
+
+        DirChild childFromFindData(
+            const std::wstring& realPath,
+            const WIN32_FIND_DATAW& data)
+        {
+            DirChild child;
+            child.name = data.cFileName;
+            child.realPath = realPath;
+            child.isDirectory = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            child.attributes = data.dwFileAttributes;
+            child.creationTime = toLargeInteger(data.ftCreationTime);
+            child.lastAccessTime = toLargeInteger(data.ftLastAccessTime);
+            child.lastWriteTime = toLargeInteger(data.ftLastWriteTime);
+            child.endOfFile.LowPart = data.nFileSizeLow;
+            child.endOfFile.HighPart = static_cast<LONG>(data.nFileSizeHigh);
+            constexpr LONGLONG cluster = 4096;
+            child.allocationSize.QuadPart = child.isDirectory
+                ? 0
+                : ((child.endOfFile.QuadPart + cluster - 1) / cluster) * cluster;
+            return child;
+        }
+
+        void upsertMergedEntry(std::vector<DirChild>& entries, DirChild child)
+        {
+            const std::wstring key = VfsTree::toLower(child.name);
+            const auto existing = std::find_if(
+                entries.begin(),
+                entries.end(),
+                [&key](const DirChild& candidate)
+                {
+                    return VfsTree::toLower(candidate.name) == key;
+                });
+
+            if (existing == entries.end())
+            {
+                entries.push_back(std::move(child));
+            }
+            else
+            {
+                *existing = std::move(child);
+            }
+        }
+
+        void mergeDynamicOverwriteEntries(DirEnumState& state)
+        {
+            if (state.mountIndex >= g_mounts.size())
+            {
+                return;
+            }
+
+            const RuntimeMount& mount = g_mounts[state.mountIndex];
+            if (isExcludedRelativePath(mount, state.relLower))
+            {
+                return;
+            }
+
+            const std::wstring directory = overwritePathForRel(mount, state.relLower);
+            if (!hasDirectoryAttribute(directory))
+            {
+                return;
+            }
+
+            WIN32_FIND_DATAW data{};
+            const HANDLE find = FindFirstFileW((directory + L"\\*").c_str(), &data);
+            if (find == INVALID_HANDLE_VALUE)
+            {
+                return;
+            }
+
+            do
+            {
+                const std::wstring name = data.cFileName;
+                if (name == L"." || name == L"..")
+                {
+                    continue;
+                }
+
+                upsertMergedEntry(
+                    state.entries,
+                    childFromFindData(joinPath(directory, name), data));
+            } while (FindNextFileW(find, &data) != 0);
+
+            FindClose(find);
+        }
+
+        bool hasPathSegment(const std::wstring& pathLower, std::wstring_view segment)
+        {
+            if (pathLower == segment)
+            {
+                return true;
+            }
+
+            const std::wstring token = L"\\" + std::wstring(segment);
+            return pathLower.size() >= token.size() &&
+                (pathLower.ends_with(token) || pathLower.find(token + L"\\") != std::wstring::npos);
+        }
+
+        bool shouldLogDiagnosticEnumeration(const DirEnumState& state)
+        {
+            if (state.mountIndex >= g_mounts.size())
+            {
+                return false;
+            }
+
+            const std::wstring& target = g_mounts[state.mountIndex].targetLower;
+            if (state.relLower == L"skse\\plugins" ||
+                state.relLower == L"dllplugins" ||
+                hasPathSegment(target, L"__mo_saves") ||
+                hasPathSegment(target, L"saves"))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         void buildEnumEntries(DirEnumState& state)
@@ -453,7 +865,7 @@ namespace fluxora::vfs
 
             const auto matches = [&state](const std::wstring& nameLower)
             {
-                return state.matchAll || wildcardMatch(nameLower, state.pattern);
+                return state.matchAll || VfsTree::wildcardMatch(nameLower, state.pattern);
             };
 
             if (matches(L"."))
@@ -469,11 +881,38 @@ namespace fluxora::vfs
             {
                 for (const DirChild& child : *listing)
                 {
-                    if (matches(VfsTree::toLower(child.name)))
-                    {
-                        state.entries.push_back(child);
-                    }
+                    state.entries.push_back(child);
                 }
+            }
+
+            mergeDynamicOverwriteEntries(state);
+            std::sort(
+                state.entries.begin(),
+                state.entries.end(),
+                [](const DirChild& left, const DirChild& right)
+                {
+                    return VfsTree::toLower(left.name) < VfsTree::toLower(right.name);
+                });
+            state.entries.erase(
+                std::remove_if(
+                    state.entries.begin(),
+                    state.entries.end(),
+                    [&matches](const DirChild& child)
+                    {
+                        return !matches(VfsTree::toLower(child.name));
+                    }),
+                state.entries.end());
+
+            if (shouldLogDiagnosticEnumeration(state))
+            {
+                const std::wstring rel = state.relLower.empty() ? L"<root>" : state.relLower;
+                const std::wstring pattern = state.pattern.empty() ? L"<all>" : state.pattern;
+                VfsLog::writef(
+                    L"VfsEnum target=%s rel=%s pattern=%s entries=%zu",
+                    g_mounts[state.mountIndex].tree.target().c_str(),
+                    rel.c_str(),
+                    pattern.c_str(),
+                    state.entries.size());
             }
 
             state.index = 0;
@@ -496,6 +935,18 @@ namespace fluxora::vfs
                 return static_cast<ULONG>(offsetof(FileIdBothDirectoryInformationRecord, FileName));
             case FileIdFullDirectoryInformation:
                 return static_cast<ULONG>(offsetof(FileIdFullDirectoryInformationRecord, FileName));
+            case FileIdExtdDirectoryInformation:
+                return static_cast<ULONG>(offsetof(FileIdExtdDirectoryInformationRecord, FileName));
+            case FileIdExtdBothDirectoryInformation:
+                return static_cast<ULONG>(offsetof(FileIdExtdBothDirectoryInformationRecord, FileName));
+            case FileId64ExtdDirectoryInformation:
+                return static_cast<ULONG>(offsetof(FileId64ExtdDirectoryInformationRecord, FileName));
+            case FileId64ExtdBothDirectoryInformation:
+                return static_cast<ULONG>(offsetof(FileId64ExtdBothDirectoryInformationRecord, FileName));
+            case FileIdAllExtdDirectoryInformation:
+                return static_cast<ULONG>(offsetof(FileIdAllExtdDirectoryInformationRecord, FileName));
+            case FileIdAllExtdBothDirectoryInformation:
+                return static_cast<ULONG>(offsetof(FileIdAllExtdBothDirectoryInformationRecord, FileName));
             default:
                 return 0; // unsupported class -> caller falls back to the real API
             }
@@ -567,6 +1018,90 @@ namespace fluxora::vfs
             case FileIdFullDirectoryInformation:
             {
                 auto* rec = reinterpret_cast<FileIdFullDirectoryInformationRecord*>(dst);
+                rec->CreationTime = child.creationTime;
+                rec->LastAccessTime = child.lastAccessTime;
+                rec->LastWriteTime = child.lastWriteTime;
+                rec->ChangeTime = child.lastWriteTime;
+                rec->EndOfFile = child.endOfFile;
+                rec->AllocationSize = child.allocationSize;
+                rec->FileAttributes = child.attributes;
+                rec->FileNameLength = nameBytes;
+                memcpy(rec->FileName, child.name.data(), nameBytes);
+                break;
+            }
+            case FileIdExtdDirectoryInformation:
+            {
+                auto* rec = reinterpret_cast<FileIdExtdDirectoryInformationRecord*>(dst);
+                rec->CreationTime = child.creationTime;
+                rec->LastAccessTime = child.lastAccessTime;
+                rec->LastWriteTime = child.lastWriteTime;
+                rec->ChangeTime = child.lastWriteTime;
+                rec->EndOfFile = child.endOfFile;
+                rec->AllocationSize = child.allocationSize;
+                rec->FileAttributes = child.attributes;
+                rec->FileNameLength = nameBytes;
+                memcpy(rec->FileName, child.name.data(), nameBytes);
+                break;
+            }
+            case FileIdExtdBothDirectoryInformation:
+            {
+                auto* rec = reinterpret_cast<FileIdExtdBothDirectoryInformationRecord*>(dst);
+                rec->CreationTime = child.creationTime;
+                rec->LastAccessTime = child.lastAccessTime;
+                rec->LastWriteTime = child.lastWriteTime;
+                rec->ChangeTime = child.lastWriteTime;
+                rec->EndOfFile = child.endOfFile;
+                rec->AllocationSize = child.allocationSize;
+                rec->FileAttributes = child.attributes;
+                rec->FileNameLength = nameBytes;
+                memcpy(rec->FileName, child.name.data(), nameBytes);
+                break;
+            }
+            case FileId64ExtdDirectoryInformation:
+            {
+                auto* rec = reinterpret_cast<FileId64ExtdDirectoryInformationRecord*>(dst);
+                rec->CreationTime = child.creationTime;
+                rec->LastAccessTime = child.lastAccessTime;
+                rec->LastWriteTime = child.lastWriteTime;
+                rec->ChangeTime = child.lastWriteTime;
+                rec->EndOfFile = child.endOfFile;
+                rec->AllocationSize = child.allocationSize;
+                rec->FileAttributes = child.attributes;
+                rec->FileNameLength = nameBytes;
+                memcpy(rec->FileName, child.name.data(), nameBytes);
+                break;
+            }
+            case FileId64ExtdBothDirectoryInformation:
+            {
+                auto* rec = reinterpret_cast<FileId64ExtdBothDirectoryInformationRecord*>(dst);
+                rec->CreationTime = child.creationTime;
+                rec->LastAccessTime = child.lastAccessTime;
+                rec->LastWriteTime = child.lastWriteTime;
+                rec->ChangeTime = child.lastWriteTime;
+                rec->EndOfFile = child.endOfFile;
+                rec->AllocationSize = child.allocationSize;
+                rec->FileAttributes = child.attributes;
+                rec->FileNameLength = nameBytes;
+                memcpy(rec->FileName, child.name.data(), nameBytes);
+                break;
+            }
+            case FileIdAllExtdDirectoryInformation:
+            {
+                auto* rec = reinterpret_cast<FileIdAllExtdDirectoryInformationRecord*>(dst);
+                rec->CreationTime = child.creationTime;
+                rec->LastAccessTime = child.lastAccessTime;
+                rec->LastWriteTime = child.lastWriteTime;
+                rec->ChangeTime = child.lastWriteTime;
+                rec->EndOfFile = child.endOfFile;
+                rec->AllocationSize = child.allocationSize;
+                rec->FileAttributes = child.attributes;
+                rec->FileNameLength = nameBytes;
+                memcpy(rec->FileName, child.name.data(), nameBytes);
+                break;
+            }
+            case FileIdAllExtdBothDirectoryInformation:
+            {
+                auto* rec = reinterpret_cast<FileIdAllExtdBothDirectoryInformationRecord*>(dst);
                 rec->CreationTime = child.creationTime;
                 rec->LastAccessTime = child.lastAccessTime;
                 rec->LastWriteTime = child.lastWriteTime;
@@ -660,6 +1195,156 @@ namespace fluxora::vfs
             return StatusSuccess;
         }
 
+        bool dosPathFromRootAndName(
+            HANDLE rootDirectory,
+            const std::wstring& objectName,
+            std::wstring& dosPath)
+        {
+            if (objectName.empty())
+            {
+                return false;
+            }
+
+            UNICODE_STRING unicode{};
+            unicode.Buffer = const_cast<PWSTR>(objectName.c_str());
+            unicode.Length = static_cast<USHORT>(objectName.size() * sizeof(wchar_t));
+            unicode.MaximumLength = static_cast<USHORT>(unicode.Length + sizeof(wchar_t));
+
+            OBJECT_ATTRIBUTES attributes{};
+            attributes.Length = sizeof(attributes);
+            attributes.RootDirectory = rootDirectory;
+            attributes.ObjectName = &unicode;
+            return dosPathFromObjectAttributes(&attributes, dosPath);
+        }
+
+        bool renameTargetDosPath(
+            HANDLE sourceHandle,
+            HANDLE rootDirectory,
+            const std::wstring& objectName,
+            std::wstring& dosPath)
+        {
+            if (rootDirectory != nullptr || isAbsoluteObjectName(objectName))
+            {
+                return dosPathFromRootAndName(rootDirectory, objectName, dosPath);
+            }
+
+            return virtualDosPathFromTrackedFileHandle(sourceHandle, objectName, dosPath) ||
+                dosPathFromRootAndName(rootDirectory, objectName, dosPath);
+        }
+
+        bool overwritePathForMountedDosPath(const std::wstring& dosPath, std::wstring& overwritePath)
+        {
+            TargetMatch match;
+            if (!underMountedTarget(dosPath, match) || match.mountIndex >= g_mounts.size())
+            {
+                return false;
+            }
+
+            const RuntimeMount& mount = g_mounts[match.mountIndex];
+            if (mount.overwrite.empty())
+            {
+                return false;
+            }
+
+            overwritePath = overwritePathForRel(mount, VfsTree::normalizeRel(match.rel));
+            makeParentDirectories(overwritePath);
+            return true;
+        }
+
+        struct RewrittenInformation
+        {
+            std::vector<BYTE> storage;
+
+            [[nodiscard]] PVOID data() noexcept
+            {
+                return storage.empty() ? nullptr : storage.data();
+            }
+
+            [[nodiscard]] ULONG size() const noexcept
+            {
+                return static_cast<ULONG>(storage.size());
+            }
+        };
+
+        bool rewriteRenameInformation(
+            HANDLE sourceHandle,
+            PVOID fileInformation,
+            ULONG length,
+            ULONG informationClass,
+            RewrittenInformation& rewritten)
+        {
+            const bool extended = informationClass == FileRenameInformationEx;
+            const ULONG base = extended
+                ? static_cast<ULONG>(offsetof(FileRenameInformationExData, FileName))
+                : static_cast<ULONG>(offsetof(FileRenameInformationData, FileName));
+            if (fileInformation == nullptr || length < base)
+            {
+                return false;
+            }
+
+            HANDLE rootDirectory = nullptr;
+            ULONG fileNameLength = 0;
+            const WCHAR* fileName = nullptr;
+            if (extended)
+            {
+                const auto* source = static_cast<const FileRenameInformationExData*>(fileInformation);
+                rootDirectory = source->RootDirectory;
+                fileNameLength = source->FileNameLength;
+                fileName = source->FileName;
+            }
+            else
+            {
+                const auto* source = static_cast<const FileRenameInformationData*>(fileInformation);
+                rootDirectory = source->RootDirectory;
+                fileNameLength = source->FileNameLength;
+                fileName = source->FileName;
+            }
+
+            if (fileNameLength == 0 || fileNameLength > length - base)
+            {
+                return false;
+            }
+
+            const std::wstring targetName(fileName, fileNameLength / sizeof(wchar_t));
+            std::wstring targetDosPath;
+            if (!renameTargetDosPath(sourceHandle, rootDirectory, targetName, targetDosPath))
+            {
+                return false;
+            }
+
+            std::wstring redirectedDosPath;
+            if (!overwritePathForMountedDosPath(targetDosPath, redirectedDosPath))
+            {
+                return false;
+            }
+
+            const std::wstring redirectedNtPath = L"\\??\\" + redirectedDosPath;
+            const ULONG redirectedNameLength =
+                static_cast<ULONG>(redirectedNtPath.size() * sizeof(wchar_t));
+            rewritten.storage.assign(base + redirectedNameLength, 0);
+
+            if (extended)
+            {
+                const auto* source = static_cast<const FileRenameInformationExData*>(fileInformation);
+                auto* target = reinterpret_cast<FileRenameInformationExData*>(rewritten.storage.data());
+                target->Flags = source->Flags;
+                target->RootDirectory = nullptr;
+                target->FileNameLength = redirectedNameLength;
+                memcpy(target->FileName, redirectedNtPath.data(), redirectedNameLength);
+            }
+            else
+            {
+                const auto* source = static_cast<const FileRenameInformationData*>(fileInformation);
+                auto* target = reinterpret_cast<FileRenameInformationData*>(rewritten.storage.data());
+                target->ReplaceIfExists = source->ReplaceIfExists;
+                target->RootDirectory = nullptr;
+                target->FileNameLength = redirectedNameLength;
+                memcpy(target->FileName, redirectedNtPath.data(), redirectedNameLength);
+            }
+
+            return true;
+        }
+
         // --- the hooks ------------------------------------------------------
         NTSTATUS NTAPI Hook_NtCreateFile(
             PHANDLE FileHandle,
@@ -690,7 +1375,8 @@ namespace fluxora::vfs
             if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
                 const bool writeAccess = desiredAccessWrites(DesiredAccess) || dispositionCreates(CreateDisposition);
-                decision = decideOpen(match.mountIndex, match.rel, CreateDisposition, writeAccess);
+                const bool directoryOpen = (CreateOptions & FILE_DIRECTORY_FILE) != 0;
+                decision = decideOpen(match.mountIndex, match.rel, CreateDisposition, writeAccess, directoryOpen);
                 handled = true;
             }
 
@@ -709,9 +1395,16 @@ namespace fluxora::vfs
                     EaBuffer, EaLength);
             }
 
-            if (handled && decision.registerMerge && status == StatusSuccess && FileHandle != nullptr)
+            if (handled && status == StatusSuccess && FileHandle != nullptr)
             {
-                registerDirectoryHandle(*FileHandle, decision.mountIndex, decision.relLower);
+                if (decision.registerMerge)
+                {
+                    registerDirectoryHandle(*FileHandle, decision.mountIndex, decision.relLower);
+                }
+                else
+                {
+                    registerFileHandle(*FileHandle, decision.mountIndex, decision.relLower);
+                }
             }
 
             return status;
@@ -740,7 +1433,13 @@ namespace fluxora::vfs
             if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
                 const bool writeAccess = desiredAccessWrites(DesiredAccess);
-                decision = decideOpen(match.mountIndex, match.rel, /*disposition=*/1 /*FILE_OPEN*/, writeAccess);
+                const bool directoryOpen = (OpenOptions & FILE_DIRECTORY_FILE) != 0;
+                decision = decideOpen(
+                    match.mountIndex,
+                    match.rel,
+                    /*disposition=*/1 /*FILE_OPEN*/,
+                    writeAccess,
+                    directoryOpen);
                 handled = true;
             }
 
@@ -757,9 +1456,16 @@ namespace fluxora::vfs
                     ShareAccess, OpenOptions);
             }
 
-            if (handled && decision.registerMerge && status == StatusSuccess && FileHandle != nullptr)
+            if (handled && status == StatusSuccess && FileHandle != nullptr)
             {
-                registerDirectoryHandle(*FileHandle, decision.mountIndex, decision.relLower);
+                if (decision.registerMerge)
+                {
+                    registerDirectoryHandle(*FileHandle, decision.mountIndex, decision.relLower);
+                }
+                else
+                {
+                    registerFileHandle(*FileHandle, decision.mountIndex, decision.relLower);
+                }
             }
 
             return status;
@@ -781,7 +1487,12 @@ namespace fluxora::vfs
             if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
                 const OpenDecision decision =
-                    decideOpen(match.mountIndex, match.rel, /*disposition=*/1, /*writeAccess=*/false);
+                    decideOpen(
+                        match.mountIndex,
+                        match.rel,
+                        /*disposition=*/1,
+                        /*writeAccess=*/false,
+                        /*directoryOpen=*/false);
                 if (decision.redirect)
                 {
                     RedirectScope redirect(ObjectAttributes, decision.path);
@@ -808,7 +1519,12 @@ namespace fluxora::vfs
             if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) && underMountedTarget(dosPath, match))
             {
                 const OpenDecision decision =
-                    decideOpen(match.mountIndex, match.rel, /*disposition=*/1, /*writeAccess=*/false);
+                    decideOpen(
+                        match.mountIndex,
+                        match.rel,
+                        /*disposition=*/1,
+                        /*writeAccess=*/false,
+                        /*directoryOpen=*/false);
                 if (decision.redirect)
                 {
                     RedirectScope redirect(ObjectAttributes, decision.path);
@@ -949,6 +1665,72 @@ namespace fluxora::vfs
             return status;
         }
 
+        NTSTATUS NTAPI Hook_NtSetInformationFile(
+            HANDLE FileHandle,
+            PIO_STATUS_BLOCK IoStatusBlock,
+            PVOID FileInformation,
+            ULONG Length,
+            ULONG FileInformationClass)
+        {
+            if (reentrant() || g_mounts.empty())
+            {
+                return Real_NtSetInformationFile(
+                    FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
+            }
+
+            Guard guard;
+            if (FileInformationClass == FileRenameInformation ||
+                FileInformationClass == FileRenameInformationEx)
+            {
+                RewrittenInformation rewritten;
+                if (rewriteRenameInformation(
+                        FileHandle,
+                        FileInformation,
+                        Length,
+                        FileInformationClass,
+                        rewritten))
+                {
+                    return Real_NtSetInformationFile(
+                        FileHandle,
+                        IoStatusBlock,
+                        rewritten.data(),
+                        rewritten.size(),
+                        FileInformationClass);
+                }
+            }
+
+            return Real_NtSetInformationFile(
+                FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
+        }
+
+        NTSTATUS NTAPI Hook_NtDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes)
+        {
+            if (reentrant() || g_mounts.empty())
+            {
+                return Real_NtDeleteFile(ObjectAttributes);
+            }
+
+            Guard guard;
+
+            std::wstring dosPath;
+            std::wstring redirectedDosPath;
+            if (dosPathFromObjectAttributes(ObjectAttributes, dosPath) &&
+                overwritePathForMountedDosPath(dosPath, redirectedDosPath) &&
+                GetFileAttributesW(redirectedDosPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                RedirectScope redirect(ObjectAttributes, redirectedDosPath);
+                return Real_NtDeleteFile(ObjectAttributes);
+            }
+
+            TargetMatch match;
+            if (underMountedTarget(dosPath, match))
+            {
+                return StatusObjectNameNotFound;
+            }
+
+            return Real_NtDeleteFile(ObjectAttributes);
+        }
+
         NTSTATUS NTAPI Hook_NtClose(HANDLE Handle)
         {
             if (!reentrant())
@@ -978,25 +1760,46 @@ namespace fluxora::vfs
             }
 
             Guard guard;
+            std::vector<wchar_t> unicodeEnvironment;
+            std::vector<char> ansiEnvironment;
+            LPVOID environment = lpEnvironment;
+            if (lpEnvironment != nullptr && !g_configPath.empty())
+            {
+                if ((dwCreationFlags & CREATE_UNICODE_ENVIRONMENT) != 0)
+                {
+                    unicodeEnvironment = environmentBlockWithConfig(static_cast<const wchar_t*>(lpEnvironment));
+                    if (!unicodeEnvironment.empty())
+                    {
+                        environment = unicodeEnvironment.data();
+                    }
+                }
+                else
+                {
+                    ansiEnvironment = environmentBlockWithConfig(static_cast<const char*>(lpEnvironment));
+                    if (!ansiEnvironment.empty())
+                    {
+                        environment = ansiEnvironment.data();
+                    }
+                }
+            }
+
             // Inject the VFS into the child too, so the entire process tree shares
             // the same virtual view (script extenders, launchers, helper tools).
             if (DetourCreateProcessWithDllExW(lpApplicationName, lpCommandLine, lpProcessAttributes,
-                    lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, lpCurrentDirectory,
+                    lpThreadAttributes, bInheritHandles, dwCreationFlags, environment, lpCurrentDirectory,
                     lpStartupInfo, lpProcessInformation, g_hookDllAnsi.c_str(),
                     reinterpret_cast<PDETOUR_CREATE_PROCESS_ROUTINEW>(Real_CreateProcessW)))
             {
                 return TRUE;
             }
 
-            // Injection can fail for a child of a different bitness (this hook DLL
-            // is x64-only) or when Detours cannot rewrite the child. Don't take the
-            // child down with us: launch it normally, just without virtualization.
+            // If the child cannot be injected, launching it normally would silently
+            // drop the MO2-style virtual view for script extenders and launchers.
             const DWORD injectionError = GetLastError();
             VfsLog::writef(
-                L"Child injection failed (error %lu); launching it unvirtualized.", injectionError);
-            return Real_CreateProcessW(lpApplicationName, lpCommandLine, lpProcessAttributes,
-                lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment,
-                lpCurrentDirectory, lpStartupInfo, lpProcessInformation);
+                L"Child injection failed (error %lu); blocked unvirtualized child launch.", injectionError);
+            SetLastError(injectionError);
+            return FALSE;
         }
 
         BOOL WINAPI Hook_CreateProcessA(
@@ -1019,8 +1822,31 @@ namespace fluxora::vfs
             }
 
             Guard guard;
+            std::vector<wchar_t> unicodeEnvironment;
+            std::vector<char> ansiEnvironment;
+            LPVOID environment = lpEnvironment;
+            if (lpEnvironment != nullptr && !g_configPath.empty())
+            {
+                if ((dwCreationFlags & CREATE_UNICODE_ENVIRONMENT) != 0)
+                {
+                    unicodeEnvironment = environmentBlockWithConfig(static_cast<const wchar_t*>(lpEnvironment));
+                    if (!unicodeEnvironment.empty())
+                    {
+                        environment = unicodeEnvironment.data();
+                    }
+                }
+                else
+                {
+                    ansiEnvironment = environmentBlockWithConfig(static_cast<const char*>(lpEnvironment));
+                    if (!ansiEnvironment.empty())
+                    {
+                        environment = ansiEnvironment.data();
+                    }
+                }
+            }
+
             if (DetourCreateProcessWithDllExA(lpApplicationName, lpCommandLine, lpProcessAttributes,
-                    lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, lpCurrentDirectory,
+                    lpThreadAttributes, bInheritHandles, dwCreationFlags, environment, lpCurrentDirectory,
                     lpStartupInfo, lpProcessInformation, g_hookDllAnsi.c_str(),
                     reinterpret_cast<PDETOUR_CREATE_PROCESS_ROUTINEA>(Real_CreateProcessA)))
             {
@@ -1029,22 +1855,28 @@ namespace fluxora::vfs
 
             const DWORD injectionError = GetLastError();
             VfsLog::writef(
-                L"Child injection failed (error %lu); launching it unvirtualized.", injectionError);
-            return Real_CreateProcessA(lpApplicationName, lpCommandLine, lpProcessAttributes,
-                lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment,
-                lpCurrentDirectory, lpStartupInfo, lpProcessInformation);
+                L"Child injection failed (error %lu); blocked unvirtualized child launch.", injectionError);
+            SetLastError(injectionError);
+            return FALSE;
         }
 
         template <typename T>
-        void attach(T& real, T hook, const char* name)
+        bool attach(T& real, T hook, const char* name, bool required = true)
         {
-            if (real != nullptr)
+            if (real == nullptr)
             {
-                if (DetourAttach(reinterpret_cast<PVOID*>(&real), reinterpret_cast<PVOID>(hook)) != NO_ERROR)
-                {
-                    VfsLog::writef(L"Failed to attach hook: %S", name);
-                }
+                VfsLog::writef(L"Hook target was not found: %S", name);
+                return !required;
             }
+
+            const LONG result = DetourAttach(reinterpret_cast<PVOID*>(&real), reinterpret_cast<PVOID>(hook));
+            if (result != NO_ERROR)
+            {
+                VfsLog::writef(L"Failed to attach hook: %S (error %ld)", name, result);
+                return !required;
+            }
+
+            return true;
         }
 
         template <typename T>
@@ -1072,6 +1904,7 @@ namespace fluxora::vfs
             mount.tree.build(mountConfig);
             mount.targetLower = VfsTree::toLower(mount.tree.target());
             mount.overwrite = mount.tree.overwrite();
+            mount.excludedRootNames = normalizedExcludedRootNames(mountConfig.excludedRootNames);
             g_mounts.push_back(std::move(mount));
         }
 
@@ -1089,6 +1922,7 @@ namespace fluxora::vfs
         }
 
         g_hookDllAnsi = toAnsi(config.hookDll);
+        g_configPath = config.configPath;
 
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr)
@@ -1107,6 +1941,9 @@ namespace fluxora::vfs
             GetProcAddress(ntdll, "NtQueryDirectoryFile"));
         Real_NtQueryDirectoryFileEx = reinterpret_cast<NtQueryDirectoryFileExFn>(
             GetProcAddress(ntdll, "NtQueryDirectoryFileEx"));
+        Real_NtSetInformationFile = reinterpret_cast<NtSetInformationFileFn>(
+            GetProcAddress(ntdll, "NtSetInformationFile"));
+        Real_NtDeleteFile = reinterpret_cast<NtDeleteFileFn>(GetProcAddress(ntdll, "NtDeleteFile"));
         Real_NtClose = reinterpret_cast<NtCloseFn>(GetProcAddress(ntdll, "NtClose"));
 
         if (DetourTransactionBegin() != NO_ERROR)
@@ -1116,15 +1953,28 @@ namespace fluxora::vfs
         }
         DetourUpdateThread(GetCurrentThread());
 
-        attach(Real_NtCreateFile, &Hook_NtCreateFile, "NtCreateFile");
-        attach(Real_NtOpenFile, &Hook_NtOpenFile, "NtOpenFile");
-        attach(Real_NtQueryAttributesFile, &Hook_NtQueryAttributesFile, "NtQueryAttributesFile");
-        attach(Real_NtQueryFullAttributesFile, &Hook_NtQueryFullAttributesFile, "NtQueryFullAttributesFile");
-        attach(Real_NtQueryDirectoryFile, &Hook_NtQueryDirectoryFile, "NtQueryDirectoryFile");
-        attach(Real_NtQueryDirectoryFileEx, &Hook_NtQueryDirectoryFileEx, "NtQueryDirectoryFileEx");
-        attach(Real_NtClose, &Hook_NtClose, "NtClose");
-        attach(Real_CreateProcessW, &Hook_CreateProcessW, "CreateProcessW");
-        attach(Real_CreateProcessA, &Hook_CreateProcessA, "CreateProcessA");
+        bool hooksAttached = true;
+        hooksAttached &= attach(Real_NtCreateFile, &Hook_NtCreateFile, "NtCreateFile");
+        hooksAttached &= attach(Real_NtOpenFile, &Hook_NtOpenFile, "NtOpenFile");
+        hooksAttached &= attach(Real_NtQueryAttributesFile, &Hook_NtQueryAttributesFile, "NtQueryAttributesFile");
+        hooksAttached &= attach(Real_NtQueryFullAttributesFile, &Hook_NtQueryFullAttributesFile, "NtQueryFullAttributesFile");
+        hooksAttached &= attach(Real_NtQueryDirectoryFile, &Hook_NtQueryDirectoryFile, "NtQueryDirectoryFile");
+        hooksAttached &= attach(
+            Real_NtQueryDirectoryFileEx,
+            &Hook_NtQueryDirectoryFileEx,
+            "NtQueryDirectoryFileEx",
+            false);
+        hooksAttached &= attach(Real_NtSetInformationFile, &Hook_NtSetInformationFile, "NtSetInformationFile");
+        hooksAttached &= attach(Real_NtDeleteFile, &Hook_NtDeleteFile, "NtDeleteFile");
+        hooksAttached &= attach(Real_NtClose, &Hook_NtClose, "NtClose");
+        hooksAttached &= attach(Real_CreateProcessW, &Hook_CreateProcessW, "CreateProcessW");
+        hooksAttached &= attach(Real_CreateProcessA, &Hook_CreateProcessA, "CreateProcessA");
+        if (!hooksAttached)
+        {
+            DetourTransactionAbort();
+            clearRuntimeState();
+            return false;
+        }
 
         const LONG result = DetourTransactionCommit();
         if (result != NO_ERROR)
@@ -1152,6 +2002,8 @@ namespace fluxora::vfs
         detach(Real_NtQueryFullAttributesFile, &Hook_NtQueryFullAttributesFile);
         detach(Real_NtQueryDirectoryFile, &Hook_NtQueryDirectoryFile);
         detach(Real_NtQueryDirectoryFileEx, &Hook_NtQueryDirectoryFileEx);
+        detach(Real_NtSetInformationFile, &Hook_NtSetInformationFile);
+        detach(Real_NtDeleteFile, &Hook_NtDeleteFile);
         detach(Real_NtClose, &Hook_NtClose);
         detach(Real_CreateProcessW, &Hook_CreateProcessW);
         detach(Real_CreateProcessA, &Hook_CreateProcessA);

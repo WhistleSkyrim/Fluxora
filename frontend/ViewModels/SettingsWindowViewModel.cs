@@ -20,6 +20,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
     private readonly CoreBridgeService coreBridgeService;
     private readonly SettingsService settingsService;
     private readonly LanguageCatalogService languageCatalogService;
+    private readonly ApplicationLogService? logService;
     private readonly IFolderPickerService folderPickerService;
     private readonly ModProject? currentProject;
     private readonly bool replaceCurrentProject;
@@ -27,6 +28,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
     private string selectedSection = ConnectionsSection;
     private bool isNexusBusy;
     private bool isNexusModsConnectionPending;
+    private bool isNexusModsConfigured;
     private bool isNexusModsLinked;
     private string nexusModsTitle = "Nexus Mods";
     private string nexusModsMessage = "Проверяю привязку...";
@@ -64,6 +66,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
         CoreBridgeService coreBridgeService,
         SettingsService settingsService,
         LanguageCatalogService languageCatalogService,
+        ApplicationLogService? logService,
         IFolderPickerService folderPickerService,
         ModProject? currentProject,
         bool replaceCurrentProject)
@@ -71,6 +74,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
         this.coreBridgeService = coreBridgeService;
         this.settingsService = settingsService;
         this.languageCatalogService = languageCatalogService;
+        this.logService = logService;
         this.folderPickerService = folderPickerService;
         this.currentProject = currentProject;
         this.replaceCurrentProject = replaceCurrentProject && currentProject is not null;
@@ -78,7 +82,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
         SelectConnectionsCommand = new RelayCommand(() => SelectSection(ConnectionsSection), () => !IsTransferProcessVisible);
         SelectLanguagesCommand = new RelayCommand(() => SelectSection(LanguagesSection), () => !IsTransferProcessVisible);
         SelectTransferCommand = new RelayCommand(() => SelectSection(TransferSection), () => !IsTransferProcessVisible);
-        ToggleNexusModsCommand = new AsyncRelayCommand(ToggleNexusModsAsync, () => !IsBusy);
+        ToggleNexusModsCommand = new AsyncRelayCommand(ToggleNexusModsAsync, () => IsNexusModsToggleEnabled);
         OpenModOrganizerTransferCommand = new RelayCommand(OpenModOrganizerTransfer, () => !IsBusy);
         CancelTransferFlowCommand = new RelayCommand(CancelTransferFlow, () => !IsBusy && IsTransferStepperOpen);
         SelectTransferStepCommand = new RelayCommand<string>(SelectTransferStep, _ => !IsBusy && IsTransferStepperOpen);
@@ -147,7 +151,7 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
         }
     }
 
-    public bool IsNexusModsToggleEnabled => !IsBusy;
+    public bool IsNexusModsToggleEnabled => !IsBusy && (IsNexusModsConfigured || IsNexusModsLinked);
 
     public bool IsNexusModsToggleChecked => IsNexusModsLinked || isNexusModsConnectionPending;
 
@@ -160,6 +164,21 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
             {
                 OnPropertyChanged(nameof(NexusModsToggleText));
                 OnPropertyChanged(nameof(IsNexusModsToggleChecked));
+                OnPropertyChanged(nameof(IsNexusModsToggleEnabled));
+                (ToggleNexusModsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool IsNexusModsConfigured
+    {
+        get => isNexusModsConfigured;
+        private set
+        {
+            if (SetField(ref isNexusModsConfigured, value))
+            {
+                OnPropertyChanged(nameof(IsNexusModsToggleEnabled));
+                (ToggleNexusModsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
             }
         }
     }
@@ -779,6 +798,11 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
     private async Task ToggleNexusModsAsync()
     {
         bool wasLinked = IsNexusModsLinked;
+        if (!wasLinked && !IsNexusModsConfigured)
+        {
+            NexusModsMessage = "Нужен зарегистрированный NexusMods OAuth client_id: задайте FLUXORA_NEXUS_CLIENT_ID.";
+            return;
+        }
 
         try
         {
@@ -955,6 +979,9 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
             }
         }
 
+        ApplicationLogService.OperationLogScope? operation = logService?.BeginOperation(
+            "ImportModOrganizerInstance",
+            $"source=\"{SourceDirectory}\", destinationRoot=\"{DestinationRootDirectory}\", existingConfig=\"{ExistingConfigPath}\", replaceExisting={IsReplaceMode}");
         try
         {
             ResetProgress();
@@ -980,15 +1007,18 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
                 ? "Текущая сборка заменена копией из MO2."
                 : "Новая сборка добавлена в Fluxora.";
             IsTransferCompleted = true;
+            operation?.Complete($"project=\"{project.Name}\", configPath=\"{project.ConfigPath}\"");
         }
         catch (Exception exception)
         {
+            operation?.Fail(exception);
             TransferError = LocalizeTransferError(exception.Message);
             TransferMessage = "Перенос остановлен.";
             IsTransferCompleted = false;
         }
         finally
         {
+            operation?.Dispose();
             IsTransferRunning = false;
         }
     }
@@ -1207,10 +1237,11 @@ public sealed class SettingsWindowViewModel : INotifyPropertyChanged, IDisposabl
 
     private void ApplyStatus(NexusModsAuthStatus status)
     {
+        IsNexusModsConfigured = status.IsConfigured;
         IsNexusModsLinked = status.IsLinked;
-        NexusModsTitle = string.IsNullOrWhiteSpace(status.DisplayName)
-            ? "Nexus Mods"
-            : $"Nexus Mods · {status.DisplayName}";
+        NexusModsTitle = status.IsLinked && !string.IsNullOrWhiteSpace(status.DisplayName)
+            ? $"Nexus Mods · {status.DisplayName}"
+            : "Nexus Mods";
         NexusModsMessage = string.IsNullOrWhiteSpace(status.Message)
             ? (status.IsLinked ? "Nexus Mods привязан." : "Nexus Mods не привязан.")
             : status.Message;

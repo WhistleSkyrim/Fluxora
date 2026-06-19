@@ -26,6 +26,7 @@ namespace fluxora::vfs
         int schemaVersion{0};
         std::wstring target;     // real game data directory
         std::wstring overwrite;  // writable overlay (highest read priority)
+        std::wstring configPath; // descriptor path loaded from FLUXORA_VFS_CONFIG
         std::wstring logPath;
         std::wstring hookDll;    // FluxoraVfs.dll path, for child re-injection
         std::vector<std::wstring> mods; // load order ascending (last wins)

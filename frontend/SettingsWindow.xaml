@@ -17,8 +17,11 @@
         ResizeMode="CanResize"
         Background="#080711"
         FontFamily="{StaticResource FluxoraFontBody}"
+        FontWeight="Medium"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
+        TextOptions.TextHintingMode="Fixed"
+        RenderOptions.ClearTypeHint="Enabled"
         FontSize="13"
         Loaded="OnLoaded">
     <shell:WindowChrome.WindowChrome>
@@ -192,7 +195,7 @@
             <Setter Property="Height" Value="40" />
             <Setter Property="Padding" Value="15,0" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -204,44 +207,14 @@
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="10"
-                                RenderTransformOrigin="0.5,0.5">
-                            <Border.RenderTransform>
-                                <ScaleTransform ScaleX="1" ScaleY="1" />
-                            </Border.RenderTransform>
+                                CornerRadius="10">
                             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                              Margin="{TemplateBinding Padding}" />
+                                              Margin="{TemplateBinding Padding}"
+                                              TextElement.FontWeight="{TemplateBinding FontWeight}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
                         </Border>
                         <ControlTemplate.Triggers>
-                            <EventTrigger RoutedEvent="MouseEnter">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                         To="1.018"
-                                                         Duration="0:0:0.14" />
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                         To="1.018"
-                                                         Duration="0:0:0.14" />
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
-                            <EventTrigger RoutedEvent="MouseLeave">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                         To="1"
-                                                         Duration="0:0:0.18" />
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                         To="1"
-                                                         Duration="0:0:0.18" />
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="Root" Property="Opacity" Value="0.82" />
                             </Trigger>
@@ -292,6 +265,7 @@
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="HorizontalContentAlignment" Value="Left" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
@@ -326,7 +300,9 @@
                                     Opacity="0" />
                             <ContentPresenter Margin="{TemplateBinding Padding}"
                                               HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              TextElement.FontWeight="{TemplateBinding FontWeight}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
                         </Grid>
                         <ControlTemplate.Triggers>
                             <EventTrigger RoutedEvent="MouseEnter">
@@ -427,6 +403,7 @@
             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Padding" Value="14" />
+            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -445,7 +422,9 @@
                                 <TranslateTransform Y="0" />
                             </Border.RenderTransform>
                             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              TextElement.FontWeight="{TemplateBinding FontWeight}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
                         </Border>
                         <ControlTemplate.Triggers>
                             <EventTrigger RoutedEvent="MouseEnter">
@@ -819,10 +798,7 @@
                                         Opacity="0"
                                         RenderTransformOrigin="0.5,0">
                                     <Border.RenderTransform>
-                                        <TransformGroup>
-                                            <ScaleTransform ScaleX="0.98" ScaleY="0.92" />
-                                            <TranslateTransform Y="-8" />
-                                        </TransformGroup>
+                                        <TranslateTransform Y="-8" />
                                     </Border.RenderTransform>
                                     <Border.Triggers>
                                         <EventTrigger RoutedEvent="FrameworkElement.Loaded">
@@ -833,15 +809,7 @@
                                                                      To="1"
                                                                      Duration="0:0:0.14" />
                                                     <DoubleAnimation Storyboard.TargetName="DropDown"
-                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)"
-                                                                     To="1"
-                                                                     Duration="0:0:0.18" />
-                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
-                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)"
-                                                                     To="1"
-                                                                     Duration="0:0:0.18" />
-                                                    <DoubleAnimation Storyboard.TargetName="DropDown"
-                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)"
+                                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
                                                                      To="0"
                                                                      Duration="0:0:0.18" />
                                                 </Storyboard>
@@ -1057,6 +1025,11 @@
                                                    FontSize="17"
                                                    FontWeight="Black"
                                                    Foreground="{StaticResource TextBrush}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding NexusModsMessage}"
+                                                   Margin="0,5,0,0"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="12"
                                                    TextWrapping="Wrap" />
                                     </StackPanel>
 

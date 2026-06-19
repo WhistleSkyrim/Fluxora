@@ -111,6 +111,7 @@ namespace fluxora::vfs
         {
             return false;
         }
+        config.configPath = path;
 
         const std::string bytes = readAllBytes(path);
         if (bytes.empty())

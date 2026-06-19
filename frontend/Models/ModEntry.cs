@@ -21,7 +21,12 @@ public sealed class ModEntry : ICollapsibleListItem, INotifyPropertyChanged
     public int ConflictingFileCount { get; init; }
     public int OverwrittenFileCount { get; init; }
     public int OverwritingFileCount { get; init; }
-    public bool IsEnabled { get; set; }
+    private bool isEnabled;
+    public bool IsEnabled
+    {
+        get => isEnabled;
+        set => SetField(ref isEnabled, value);
+    }
     public bool CanCheckUpdates { get; init; }
     public bool HasUpdate { get; init; }
 
@@ -50,6 +55,13 @@ public sealed class ModEntry : ICollapsibleListItem, INotifyPropertyChanged
     {
         get => isUnderSeparator;
         set => SetField(ref isUnderSeparator, value);
+    }
+
+    private bool isSelected;
+    public bool IsSelected
+    {
+        get => isSelected;
+        set => SetField(ref isSelected, value);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

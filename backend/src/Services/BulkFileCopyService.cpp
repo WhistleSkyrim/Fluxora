@@ -1,5 +1,7 @@
 #include "FluxoraCore/Services/BulkFileCopyService.hpp"
 
+#include "FluxoraCore/Services/PathSafetyService.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -629,7 +631,7 @@ namespace fluxora
         {
             const std::size_t detectedWorkers = hardwareThreads == 0 ? 4 : hardwareThreads;
             constexpr std::uintmax_t largeTransfer = 1024ull * 1024ull * 1024ull;
-            const std::size_t cap = totalBytes >= largeTransfer ? 2 : 4;
+            const std::size_t cap = totalBytes >= largeTransfer ? 4 : 6;
             return (std::max<std::size_t>)(1, (std::min)(detectedWorkers, cap));
         }
 
@@ -684,7 +686,145 @@ namespace fluxora
         }
 
 #ifdef _WIN32
-        void copyFileWithProgressWin32(
+        struct Win32CopyProgressContext
+        {
+            CopyProgressState& state;
+            std::uintmax_t totalBytes{0};
+            const std::function<void(const BulkFileCopyProgress&)>& progress;
+            std::wstring_view currentStep;
+            const std::filesystem::path& currentItem;
+            std::uintmax_t plannedFileBytes{0};
+            std::uintmax_t lastFileBytes{0};
+        };
+
+        std::uintmax_t largeIntegerToByteCount(LARGE_INTEGER value) noexcept
+        {
+            return value.QuadPart <= 0
+                ? 0
+                : static_cast<std::uintmax_t>(value.QuadPart);
+        }
+
+        DWORD CALLBACK copyFileProgressRoutine(
+            LARGE_INTEGER,
+            LARGE_INTEGER totalBytesTransferred,
+            LARGE_INTEGER,
+            LARGE_INTEGER,
+            DWORD,
+            DWORD,
+            HANDLE,
+            HANDLE,
+            LPVOID data)
+        {
+            auto* context = static_cast<Win32CopyProgressContext*>(data);
+            if (context == nullptr)
+            {
+                return PROGRESS_CONTINUE;
+            }
+
+            std::uintmax_t transferred = largeIntegerToByteCount(totalBytesTransferred);
+            if (context->plannedFileBytes > 0)
+            {
+                transferred = (std::min)(transferred, context->plannedFileBytes);
+            }
+            if (transferred > context->lastFileBytes)
+            {
+                addCopiedBytes(
+                    context->state,
+                    transferred - context->lastFileBytes,
+                    context->totalBytes,
+                    context->progress,
+                    context->currentStep,
+                    context->currentItem);
+                context->lastFileBytes = transferred;
+            }
+
+            return PROGRESS_CONTINUE;
+        }
+
+        bool copyFileWithWindowsCopyEngine(
+            const CopyFileTask& task,
+            CopyProgressState& state,
+            std::uintmax_t totalBytes,
+            const std::function<void(const BulkFileCopyProgress&)>& progress,
+            const Logger& logger,
+            const BulkFileCopyOptions& options)
+        {
+            Win32CopyProgressContext context{
+                state,
+                totalBytes,
+                progress,
+                task.currentStep,
+                task.source,
+                task.bytes
+            };
+            DWORD copyError = ERROR_SUCCESS;
+            bool closeAttempted = false;
+
+            for (int attempt = 1; ; ++attempt)
+            {
+                context.lastFileBytes = 0;
+                SetLastError(ERROR_SUCCESS);
+                if (CopyFileExW(
+                        pathForWin32Io(task.source).c_str(),
+                        pathForWin32Io(task.destination).c_str(),
+                        copyFileProgressRoutine,
+                        &context,
+                        nullptr,
+                        0) != FALSE)
+                {
+                    if (context.lastFileBytes < task.bytes)
+                    {
+                        addCopiedBytes(
+                            state,
+                            task.bytes - context.lastFileBytes,
+                            totalBytes,
+                            progress,
+                            task.currentStep,
+                            task.source);
+                    }
+                    return true;
+                }
+
+                copyError = GetLastError();
+                if (context.lastFileBytes > 0)
+                {
+                    logCopyFailure(logger, options, task, "copy-engine-file-failed", win32ErrorForLog(copyError));
+                    throw std::runtime_error(copyFailureMessage("Failed to copy file during import.", task));
+                }
+
+                if (!closeAttempted &&
+                    (copyError == ERROR_ACCESS_DENIED ||
+                        copyError == ERROR_LOCK_VIOLATION ||
+                        copyError == ERROR_SHARING_VIOLATION))
+                {
+                    closeAttempted = closeProcessesLockingPath(task.destination);
+                    if (closeAttempted)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                        continue;
+                    }
+                }
+
+                if (attempt >= 6)
+                {
+                    break;
+                }
+
+                if (copyError == ERROR_ACCESS_DENIED ||
+                    copyError == ERROR_LOCK_VIOLATION ||
+                    copyError == ERROR_SHARING_VIOLATION)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+                    continue;
+                }
+
+                break;
+            }
+
+            return false;
+        }
+
+        void copyFileWithProgressWin32Manual(
             const CopyFileTask& task,
             CopyProgressState& state,
             std::uintmax_t totalBytes,
@@ -813,6 +953,22 @@ namespace fluxora
                 logCopyFailure(logger, options, task, "close-destination-file-failed", win32ErrorForLog(error));
                 throw std::runtime_error(copyFailureMessage("Failed to write target file during import.", task));
             }
+        }
+
+        void copyFileWithProgressWin32(
+            const CopyFileTask& task,
+            CopyProgressState& state,
+            std::uintmax_t totalBytes,
+            const std::function<void(const BulkFileCopyProgress&)>& progress,
+            const Logger& logger,
+            const BulkFileCopyOptions& options)
+        {
+            if (copyFileWithWindowsCopyEngine(task, state, totalBytes, progress, logger, options))
+            {
+                return;
+            }
+
+            copyFileWithProgressWin32Manual(task, state, totalBytes, progress, logger, options);
         }
 #endif
 
@@ -1014,6 +1170,9 @@ namespace fluxora
                 return;
             }
 
+            const PathSafetyService safety;
+            safety.validateDirectoryWriteRoot(root.destinationDirectory)
+                .throwIfUnsafe("Bulk copy destination root is unsafe");
             createDirectoryDuringCopy(root.destinationDirectory, logger, options);
             publishCopyProgress(
                 state,
@@ -1049,6 +1208,9 @@ namespace fluxora
                     continue;
                 }
 
+                safety.validateContainedPath(root.sourceDirectory, source)
+                    .throwIfUnsafe("Bulk copy source path is unsafe");
+
                 std::error_code relativeError;
                 const std::filesystem::path relative =
                     std::filesystem::relative(source, root.sourceDirectory, relativeError);
@@ -1066,12 +1228,19 @@ namespace fluxora
                 std::error_code typeError;
                 if (iterator->is_directory(typeError))
                 {
+                    safety.validateWritePath(root.destinationDirectory, destination)
+                        .throwIfUnsafe("Bulk copy directory destination is unsafe");
                     createDirectoryDuringCopy(destination, logger, options);
                 }
                 else if (!typeError && iterator->is_regular_file(typeError))
                 {
                     std::error_code sizeError;
                     const std::uintmax_t bytes = iterator->file_size(sizeError);
+                    safety.validateWritePath(
+                        root.destinationDirectory,
+                        destination,
+                        PathSafetyWriteOptions{0, false})
+                        .throwIfUnsafe("Bulk copy file destination is unsafe");
                     if (!enqueueCopyTask(
                             queue,
                             CopyFileTask{

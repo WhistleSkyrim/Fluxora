@@ -1,11 +1,16 @@
 #include "FluxoraCore/Services/ModOrganizerExecutableImportService.hpp"
 
+#include "FluxoraCore/GameSupport/GameDetectionService.hpp"
+#include "FluxoraCore/GameSupport/GameHealthCheckService.hpp"
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cwctype>
 #include <functional>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <system_error>
@@ -119,19 +124,161 @@ namespace fluxora
             return value;
         }
 
-        void replaceAll(std::wstring& value, std::wstring_view token, std::wstring_view replacement)
+        std::string toUtf8(const std::wstring& value)
         {
-            if (token.empty())
+#ifdef _WIN32
+            if (value.empty())
             {
+                return {};
+            }
+
+            const int size = WideCharToMultiByte(
+                CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+            if (size <= 0)
+            {
+                return {};
+            }
+
+            std::string out(static_cast<std::size_t>(size), '\0');
+            WideCharToMultiByte(
+                CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), size, nullptr, nullptr);
+            return out;
+#else
+            return std::string(value.begin(), value.end());
+#endif
+        }
+
+        std::wstring fromBytes(const std::string& value)
+        {
+#ifdef _WIN32
+            if (value.empty())
+            {
+                return {};
+            }
+
+            int size = MultiByteToWideChar(
+                CP_UTF8,
+                MB_ERR_INVALID_CHARS,
+                value.data(),
+                static_cast<int>(value.size()),
+                nullptr,
+                0);
+            UINT codePage = CP_UTF8;
+            DWORD flags = MB_ERR_INVALID_CHARS;
+            if (size <= 0)
+            {
+                codePage = CP_ACP;
+                flags = 0;
+                size = MultiByteToWideChar(
+                    codePage,
+                    flags,
+                    value.data(),
+                    static_cast<int>(value.size()),
+                    nullptr,
+                    0);
+            }
+
+            if (size <= 0)
+            {
+                return std::wstring(value.begin(), value.end());
+            }
+
+            std::wstring out(static_cast<std::size_t>(size), L'\0');
+            MultiByteToWideChar(
+                codePage,
+                flags,
+                value.data(),
+                static_cast<int>(value.size()),
+                out.data(),
+                size);
+            return out;
+#else
+            return std::wstring(value.begin(), value.end());
+#endif
+        }
+
+        void appendWideCharacterAsBytes(std::string& bytes, wchar_t character)
+        {
+            if (character <= 0xFF)
+            {
+                bytes.push_back(static_cast<char>(character));
                 return;
             }
 
-            std::size_t position = 0;
-            while ((position = value.find(token, position)) != std::wstring::npos)
+            bytes += toUtf8(std::wstring(1, character));
+        }
+
+        int hexDigit(wchar_t character)
+        {
+            if (character >= L'0' && character <= L'9')
             {
-                value.replace(position, token.size(), replacement);
-                position += replacement.size();
+                return static_cast<int>(character - L'0');
             }
+            if (character >= L'a' && character <= L'f')
+            {
+                return static_cast<int>(character - L'a' + 10);
+            }
+            if (character >= L'A' && character <= L'F')
+            {
+                return static_cast<int>(character - L'A' + 10);
+            }
+
+            return -1;
+        }
+
+        std::wstring decodeQtByteArrayPayload(const std::wstring& payload)
+        {
+            std::string bytes;
+            bytes.reserve(payload.size());
+
+            for (std::size_t index = 0; index < payload.size(); ++index)
+            {
+                const wchar_t character = payload[index];
+                if (character != L'\\' || index + 1 >= payload.size())
+                {
+                    appendWideCharacterAsBytes(bytes, character);
+                    continue;
+                }
+
+                const wchar_t escaped = payload[++index];
+                switch (escaped)
+                {
+                case L'n':
+                    bytes.push_back('\n');
+                    break;
+                case L'r':
+                    bytes.push_back('\r');
+                    break;
+                case L't':
+                    bytes.push_back('\t');
+                    break;
+                case L'\\':
+                    bytes.push_back('\\');
+                    break;
+                case L'x':
+                {
+                    if (index + 2 < payload.size())
+                    {
+                        const int high = hexDigit(payload[index + 1]);
+                        const int low = hexDigit(payload[index + 2]);
+                        if (high >= 0 && low >= 0)
+                        {
+                            bytes.push_back(static_cast<char>((high << 4) | low));
+                            index += 2;
+                            break;
+                        }
+                    }
+
+                    bytes.push_back('x');
+                    break;
+                }
+                default:
+                    appendWideCharacterAsBytes(bytes, escaped);
+                    break;
+                }
+            }
+
+            return fromBytes(bytes);
         }
 
         void replaceAllIgnoreCase(
@@ -162,8 +309,7 @@ namespace fluxora
             value = stripQuotes(std::move(value));
             if (startsWithIgnoreCase(value, L"@ByteArray(") && value.size() >= 12 && value.back() == L')')
             {
-                value = value.substr(11, value.size() - 12);
-                replaceAll(value, L"\\\\", L"\\");
+                return decodeQtByteArrayPayload(value.substr(11, value.size() - 12));
             }
 
             return value;
@@ -323,26 +469,195 @@ namespace fluxora
                 return false;
             }
 
-            static constexpr std::array<std::wstring_view, 8> knownGameExecutables{
-                L"SkyrimSE.exe",
-                L"SkyrimSELauncher.exe",
-                L"SkyrimVR.exe",
-                L"SkyrimVRLauncher.exe",
-                L"TESV.exe",
-                L"SkyrimLauncher.exe",
-                L"Fallout4.exe",
-                L"Starfield.exe"
-            };
-
-            for (std::wstring_view executable : knownGameExecutables)
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            GameDetectionService detectionService(registry);
+            GameDetectionRequest request;
+            request.installPath = gamePath;
+            const GameDetectionResult detection = detectionService.detect(request);
+            if (!detection.detected)
             {
-                if (isRegularFile(gamePath / std::filesystem::path(executable)))
+                return false;
+            }
+
+            const GameHealthCheckResult health = GameHealthCheckService().check(detection);
+            return health.allowsAutomation();
+        }
+
+        void appendUniqueCandidateName(std::vector<std::wstring>& names, std::wstring name)
+        {
+            name = trim(std::move(name));
+            if (name.empty())
+            {
+                return;
+            }
+
+            const auto duplicate = std::find_if(
+                names.begin(),
+                names.end(),
+                [&name](const std::wstring& existing)
+                {
+                    return equalsIgnoreCase(existing, name);
+                });
+            if (duplicate == names.end())
+            {
+                names.push_back(std::move(name));
+            }
+        }
+
+        void appendExecutableRoleCandidateNames(
+            std::vector<std::wstring>& names,
+            const ModOrganizerExecutableImportContext& context,
+            std::optional<GameExecutableRole> role)
+        {
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(context.templateId);
+            if (!lookup.supported || lookup.support == nullptr)
+            {
+                return;
+            }
+
+            const GameSupportComponents& components = lookup.support->components();
+            if (components.executableRulesProvider == nullptr)
+            {
+                return;
+            }
+
+            const ExecutableSupportRules& rules = components.executableRulesProvider->executableRules();
+            if (role.has_value())
+            {
+                switch (role.value())
+                {
+                case GameExecutableRole::Primary:
+                    if (rules.roles.primary.has_value())
+                    {
+                        appendUniqueCandidateName(names, rules.roles.primary->displayName());
+                    }
+                    break;
+                case GameExecutableRole::Launcher:
+                    if (rules.roles.launcher.has_value())
+                    {
+                        appendUniqueCandidateName(names, rules.roles.launcher->displayName());
+                    }
+                    break;
+                case GameExecutableRole::ScriptExtender:
+                    if (rules.roles.scriptExtender.has_value())
+                    {
+                        appendUniqueCandidateName(names, rules.roles.scriptExtender->displayName());
+                    }
+                    break;
+                }
+            }
+
+            for (const GameExecutableDefinition& executable : rules.executables)
+            {
+                if (!role.has_value() || executable.role == role.value())
+                {
+                    appendUniqueCandidateName(names, executable.name.displayName());
+                }
+            }
+        }
+
+        void appendSupportTextToken(std::vector<std::wstring>& tokens, std::wstring token)
+        {
+            token = trim(std::move(token));
+            if (token.size() < 3)
+            {
+                return;
+            }
+
+            const auto duplicate = std::find_if(
+                tokens.begin(),
+                tokens.end(),
+                [&token](const std::wstring& existing)
+                {
+                    return equalsIgnoreCase(existing, token);
+                });
+            if (duplicate == tokens.end())
+            {
+                tokens.push_back(std::move(token));
+            }
+        }
+
+        std::wstring fileNameWithoutExtension(const std::wstring& pathText);
+
+        std::vector<std::wstring> scriptExtenderTitleTokens(
+            const ModOrganizerExecutableImportContext& context)
+        {
+            std::vector<std::wstring> tokens;
+            appendSupportTextToken(tokens, fileNameWithoutExtension(context.scriptExtenderLoaderExecutable));
+
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(context.templateId);
+            if (!lookup.supported || lookup.support == nullptr)
+            {
+                return tokens;
+            }
+
+            const GameSupportComponents& components = lookup.support->components();
+            if (components.launchRulesProvider != nullptr)
+            {
+                const LaunchSupportRules& launch = components.launchRulesProvider->launchRules();
+                if (launch.rules.scriptExtender.has_value())
+                {
+                    appendSupportTextToken(tokens, launch.rules.scriptExtender->name);
+                    appendSupportTextToken(tokens, launch.rules.scriptExtender->loaderExecutable.displayName());
+                    appendSupportTextToken(
+                        tokens,
+                        fileNameWithoutExtension(launch.rules.scriptExtender->loaderExecutable.displayName()));
+                }
+            }
+
+            if (components.executableRulesProvider != nullptr)
+            {
+                const ExecutableSupportRules& rules = components.executableRulesProvider->executableRules();
+                for (const GameExecutableDefinition& executable : rules.executables)
+                {
+                    if (executable.role == GameExecutableRole::ScriptExtender)
+                    {
+                        appendSupportTextToken(tokens, executable.displayName);
+                        appendSupportTextToken(tokens, executable.name.displayName());
+                        appendSupportTextToken(tokens, fileNameWithoutExtension(executable.name.displayName()));
+                    }
+                }
+            }
+
+            return tokens;
+        }
+
+        std::vector<std::wstring> gameIdentityTitleTokens(
+            const ModOrganizerExecutableImportContext& context)
+        {
+            std::vector<std::wstring> tokens;
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(context.templateId);
+            if (!lookup.supported || lookup.support == nullptr)
+            {
+                return tokens;
+            }
+
+            const GameIdentityRules& identity = lookup.support->identity();
+            appendSupportTextToken(tokens, identity.displayName);
+            appendSupportTextToken(tokens, identity.id.value());
+            appendSupportTextToken(tokens, identity.uiTemplateId.value());
+            for (const std::wstring& alias : identity.aliases)
+            {
+                appendSupportTextToken(tokens, alias);
+            }
+
+            return tokens;
+        }
+
+        bool titleMatchesAnyToken(std::wstring_view title, const std::vector<std::wstring>& tokens)
+        {
+            for (const std::wstring& token : tokens)
+            {
+                if (containsIgnoreCase(title, token) || containsIgnoreCase(token, title))
                 {
                     return true;
                 }
             }
 
-            return isDirectory(gamePath / L"Data");
+            return false;
         }
 
         bool isScriptExtenderLoaderName(
@@ -360,12 +675,7 @@ namespace fluxora
             {
                 candidateNames.push_back(context.scriptExtenderLoaderExecutable);
             }
-            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
-            {
-                candidateNames.push_back(L"skse64_loader.exe");
-                candidateNames.push_back(L"sksevr_loader.exe");
-                candidateNames.push_back(L"skse_loader.exe");
-            }
+            appendExecutableRoleCandidateNames(candidateNames, context, GameExecutableRole::ScriptExtender);
 
             for (const std::wstring& candidateName : candidateNames)
             {
@@ -715,27 +1025,21 @@ namespace fluxora
             }
 
             std::vector<std::wstring> candidateNames;
-            if (containsIgnoreCase(entry.title, L"skse"))
+            if (titleMatchesAnyToken(entry.title, scriptExtenderTitleTokens(context)))
             {
                 if (!context.scriptExtenderLoaderExecutable.empty())
                 {
-                    candidateNames.push_back(context.scriptExtenderLoaderExecutable);
+                    appendUniqueCandidateName(candidateNames, context.scriptExtenderLoaderExecutable);
                 }
-                candidateNames.push_back(L"skse64_loader.exe");
-                candidateNames.push_back(L"sksevr_loader.exe");
-                candidateNames.push_back(L"skse_loader.exe");
+                appendExecutableRoleCandidateNames(candidateNames, context, GameExecutableRole::ScriptExtender);
             }
             else if (containsIgnoreCase(entry.title, L"launcher"))
             {
-                candidateNames.push_back(L"SkyrimSELauncher.exe");
-                candidateNames.push_back(L"SkyrimVRLauncher.exe");
-                candidateNames.push_back(L"SkyrimLauncher.exe");
+                appendExecutableRoleCandidateNames(candidateNames, context, GameExecutableRole::Launcher);
             }
-            else if (containsIgnoreCase(entry.title, L"skyrim"))
+            else if (titleMatchesAnyToken(entry.title, gameIdentityTitleTokens(context)))
             {
-                candidateNames.push_back(L"SkyrimSE.exe");
-                candidateNames.push_back(L"SkyrimVR.exe");
-                candidateNames.push_back(L"TESV.exe");
+                appendExecutableRoleCandidateNames(candidateNames, context, GameExecutableRole::Primary);
             }
 
             for (const std::wstring& candidateName : candidateNames)
@@ -773,23 +1077,8 @@ namespace fluxora
             const ModOrganizerExecutableImportContext& context)
         {
             std::vector<std::wstring> candidateNames;
-            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
-            {
-                candidateNames.push_back(L"SkyrimSE.exe");
-                candidateNames.push_back(L"Skyrim SE.exe");
-                candidateNames.push_back(L"SkyrimSELauncher.exe");
-            }
-            else if (containsIgnoreCase(context.templateId, L"skyrim"))
-            {
-                candidateNames.push_back(L"SkyrimSE.exe");
-                candidateNames.push_back(L"Skyrim SE.exe");
-                candidateNames.push_back(L"TESV.exe");
-            }
-
-            candidateNames.push_back(L"SkyrimSE.exe");
-            candidateNames.push_back(L"Skyrim SE.exe");
-            candidateNames.push_back(L"Fallout4.exe");
-            candidateNames.push_back(L"Starfield.exe");
+            appendExecutableRoleCandidateNames(candidateNames, context, GameExecutableRole::Primary);
+            appendExecutableRoleCandidateNames(candidateNames, context, std::nullopt);
 
             std::set<std::wstring> seen;
             for (const std::wstring& candidateName : candidateNames)
@@ -808,6 +1097,46 @@ namespace fluxora
             return std::nullopt;
         }
 
+        std::optional<std::wstring> displayNameForExecutable(
+            const ModOrganizerExecutableImportContext& context,
+            std::wstring_view executableName)
+        {
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(context.templateId);
+            if (!lookup.supported || lookup.support == nullptr)
+            {
+                return std::nullopt;
+            }
+
+            const GameSupportComponents& components = lookup.support->components();
+            if (components.executableRulesProvider == nullptr)
+            {
+                return std::nullopt;
+            }
+
+            const ExecutableSupportRules& rules = components.executableRulesProvider->executableRules();
+            for (const GameExecutableDefinition& executable : rules.executables)
+            {
+                if (equalsIgnoreCase(executable.name.displayName(), executableName))
+                {
+                    if (!executable.displayName.empty())
+                    {
+                        return executable.displayName;
+                    }
+
+                    if (executable.role == GameExecutableRole::Primary &&
+                        !lookup.support->identity().displayName.empty())
+                    {
+                        return lookup.support->identity().displayName;
+                    }
+
+                    break;
+                }
+            }
+
+            return std::nullopt;
+        }
+
         std::optional<GameExecutable> defaultGameExecutable(
             const ModOrganizerExecutableImportContext& context)
         {
@@ -818,9 +1147,11 @@ namespace fluxora
             }
 
             std::wstring displayName = fileNameWithoutExtension(executableName.value());
-            if (equalsIgnoreCase(context.templateId, L"skyrimse"))
+            if (const std::optional<std::wstring> supportDisplayName =
+                displayNameForExecutable(context, executableName.value());
+                supportDisplayName.has_value() && !supportDisplayName->empty())
             {
-                displayName = L"Skyrim Special Edition";
+                displayName = supportDisplayName.value();
             }
 
             return GameExecutable{

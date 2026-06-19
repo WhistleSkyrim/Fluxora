@@ -16,6 +16,12 @@ public sealed class ModProject
     /// <summary>Id of the game template this build was created from.</summary>
     public string TemplateId { get; init; } = string.Empty;
 
+    public string UiTemplateId { get; set; } = string.Empty;
+    public GameCapabilities GameCapabilities { get; set; } = new();
+    public GameHealthSummary GameHealthSummary { get; set; } = new();
+    public ProjectFingerprint? ProjectFingerprint { get; set; }
+    public ContentLayoutSummary ContentLayoutSummary { get; set; } = new();
+
     /// <summary>
     /// Resolved (base + game) template that shaped this build. Used by the detail
     /// view to show the build's structure and functional modules.
@@ -23,6 +29,8 @@ public sealed class ModProject
     public ResolvedTemplate? Template { get; init; }
 
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.Now;
+
+    public DateTimeOffset? LastLaunchedAt { get; set; }
 
     public void ApplyPathSettings(BuildPathSettings settings)
     {

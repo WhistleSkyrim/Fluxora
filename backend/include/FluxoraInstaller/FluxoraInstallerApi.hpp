@@ -31,6 +31,9 @@ extern "C"
 
     FLUXORA_INSTALLER_API int fluxora_installer_is_available();
 
+    FLUXORA_INSTALLER_API int fluxora_installer_set_operation_context(
+        const wchar_t* operationId);
+
     FLUXORA_INSTALLER_API int fluxora_installer_validate_install_directory(
         const wchar_t* installDirectory,
         wchar_t* messageBuffer,

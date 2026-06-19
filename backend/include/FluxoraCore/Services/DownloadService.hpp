@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FluxoraCore/Services/ContentLayoutService.hpp"
+#include "FluxoraCore/Services/FomodInstallerService.hpp"
 #include "FluxoraCore/Services/IService.hpp"
 
 #include <filesystem>
@@ -40,6 +42,13 @@ namespace fluxora
         std::wstring name;
         std::wstring version;
         bool isEnabled{true};
+    };
+
+    enum class ExistingModInstallMode
+    {
+        FailIfExists = 0,
+        Replace = 1,
+        Merge = 2
     };
 
     class DownloadService final : public IService
@@ -88,7 +97,30 @@ namespace fluxora
         InstalledMod installDownload(
             const std::filesystem::path& projectDirectory,
             const std::filesystem::path& downloadPath,
-            std::wstring_view modName) const;
+            std::wstring_view modName,
+            ExistingModInstallMode existingModMode = ExistingModInstallMode::FailIfExists) const;
+
+        [[nodiscard]] PlacementPlan analyzeDownloadContentLayout(
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& downloadPath,
+            ExistingModInstallMode existingModMode = ExistingModInstallMode::FailIfExists) const;
+
+        [[nodiscard]] FomodInstallerDescriptor analyzeFomodDownload(
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& downloadPath) const;
+
+        [[nodiscard]] PlacementPlan analyzeFomodDownloadContentLayout(
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& downloadPath,
+            ExistingModInstallMode existingModMode,
+            const std::vector<std::wstring>& selectedOptionIds) const;
+
+        InstalledMod installFomodDownload(
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& downloadPath,
+            std::wstring_view modName,
+            ExistingModInstallMode existingModMode,
+            const std::vector<std::wstring>& selectedOptionIds) const;
 
         [[nodiscard]] bool isInitialized() const noexcept;
 

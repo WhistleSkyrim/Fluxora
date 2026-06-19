@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fluxora.local/schemas/game-definition.schema.json",
+  "title": "Fluxora Game Definition",
+  "description": "Strict data contract for bundled Fluxora game definition JSON documents.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "definitionVersion",
+    "id",
+    "displayName",
+    "requiredFiles",
+    "executables",
+    "archiveExtensions",
+    "pluginExtensions",
+    "capabilities",
+    "uiTemplateId"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1"
+    },
+    "definitionVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "id": {
+      "$ref": "#/$defs/normalizedIdentifier"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string"
+    },
+    "aliases": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "domains": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "installFolderAliases": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "defaultProfileName": {
+      "type": "string"
+    },
+    "dataFolder": {
+      "type": "string"
+    },
+    "requiredFiles": {
+      "$ref": "#/$defs/nonEmptyStringArrayRequired"
+    },
+    "executables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/executable"
+      }
+    },
+    "executableRoles": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/executableName"
+        },
+        "launcher": {
+          "$ref": "#/$defs/executableName"
+        },
+        "scriptExtender": {
+          "$ref": "#/$defs/executableName"
+        }
+      }
+    },
+    "archiveExtensions": {
+      "$ref": "#/$defs/extensionArray"
+    },
+    "pluginExtensions": {
+      "$ref": "#/$defs/extensionArray"
+    },
+    "capabilities": {
+      "$ref": "#/$defs/capabilities"
+    },
+    "uiTemplateId": {
+      "$ref": "#/$defs/normalizedIdentifier"
+    },
+    "detectionHints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executableNames": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/executableName"
+          }
+        },
+        "folderNames": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "domains": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    },
+    "pluginRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profileFiles": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "basePlugins": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    },
+    "contentLayoutRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dataFolder": {
+          "type": "string"
+        },
+        "supportsRootFiles": {
+          "type": "boolean"
+        },
+        "rootFileWrapperDirectory": {
+          "type": "string"
+        }
+      }
+    },
+    "vfsRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "supportsRootBuilder": {
+          "type": "boolean"
+        },
+        "rootBuilderDirectoryName": {
+          "type": "string"
+        },
+        "userSettingsDirectoryName": {
+          "type": "string"
+        },
+        "profileIniFileNames": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "saveDirectoryNames": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "excludedLaunchCacheDirectories": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    },
+    "launchRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scriptExtender": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "loaderExecutable"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "loaderExecutable": {
+              "$ref": "#/$defs/executableName"
+            },
+            "website": {
+              "type": "string"
+            },
+            "expectedChildProcessNames": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/executableName"
+              }
+            },
+            "handoffDisplayName": {
+              "type": "string"
+            },
+            "handoffTimeoutMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "launchTrackingKind": {
+              "enum": [
+                "direct",
+                "direct-process",
+                "directProcess",
+                "expected-child-process",
+                "expectedChildProcess",
+                "child-process",
+                "childProcess"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "healthRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requiredFiles": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "normalizedIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "nonEmptyStringArrayRequired": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "extension": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\.?[^\\\\/\\.][^\\\\/]*$"
+    },
+    "extensionArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/extension"
+      }
+    },
+    "executableName": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\\\/]"
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "name",
+        "role"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "$ref": "#/$defs/executableName"
+        },
+        "role": {
+          "enum": [
+            "primary",
+            "launcher",
+            "scriptExtender",
+            "script-extender"
+          ]
+        },
+        "workingDirectory": {
+          "enum": [
+            "executable-directory",
+            "executableDirectory",
+            "executable-dir",
+            "executableDir",
+            "game-root",
+            "gameRoot",
+            "game"
+          ]
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supportsPlugins",
+        "supportsLoadOrder",
+        "supportsRootFiles",
+        "supportsArchives",
+        "supportsScriptExtender",
+        "supportsIniProfiles",
+        "supportsSaveProfiles",
+        "supportsGameSpecificVfs",
+        "supportsContentLayoutRules"
+      ],
+      "properties": {
+        "supportsPlugins": {
+          "type": "boolean"
+        },
+        "supportsLoadOrder": {
+          "type": "boolean"
+        },
+        "supportsRootFiles": {
+          "type": "boolean"
+        },
+        "supportsArchives": {
+          "type": "boolean"
+        },
+        "supportsScriptExtender": {
+          "type": "boolean"
+        },
+        "supportsIniProfiles": {
+          "type": "boolean"
+        },
+        "supportsSaveProfiles": {
+          "type": "boolean"
+        },
+        "supportsGameSpecificVfs": {
+          "type": "boolean"
+        },
+        "supportsContentLayoutRules": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

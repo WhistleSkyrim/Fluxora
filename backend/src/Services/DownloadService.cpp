@@ -1,8 +1,12 @@
 #include "FluxoraCore/Services/DownloadService.hpp"
 
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
 #include "FluxoraCore/Services/AppSettingsService.hpp"
 #include "FluxoraCore/Services/BuildPathSettingsService.hpp"
+#include "FluxoraCore/Services/ContentLayoutService.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
+#include "FluxoraCore/Services/PathSafetyService.hpp"
+#include "FluxoraCore/Storage/AtomicFileStore.hpp"
 #include "FluxoraCore/Storage/InstanceMetadataStore.hpp"
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
@@ -18,13 +22,17 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -82,6 +90,9 @@ namespace fluxora
             L".arj",
             L".lzh",
             L".lha"
+        };
+        constexpr std::array<std::wstring_view, 1> rawModArchiveExtensions{
+            L".ba2"
         };
         std::mutex activeDownloadsMutex;
         std::set<std::wstring> activeDownloads;
@@ -255,31 +266,13 @@ namespace fluxora
 
         void writeTextFile(const std::filesystem::path& path, const std::string& content)
         {
-            const std::filesystem::path parent = path.parent_path();
-            if (!parent.empty())
-            {
-                std::filesystem::create_directories(parent);
-            }
-
-            const std::filesystem::path temporaryPath = path.wstring() + std::wstring(transientFileExtension);
-            std::ofstream file(temporaryPath, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!file)
-            {
-                throw std::runtime_error("Failed to write download file.");
-            }
-
-            file.write(content.data(), static_cast<std::streamsize>(content.size()));
-            file.close();
-
-            std::error_code error;
-            std::filesystem::rename(temporaryPath, path, error);
-            if (!error)
-            {
-                return;
-            }
-
-            std::filesystem::remove(path, error);
-            std::filesystem::rename(temporaryPath, path);
+            AtomicFileStore().writeTextFile(
+                path,
+                content,
+                AtomicFileWriteOptions{
+                    L"generated download metadata",
+                    ProjectStateValidation::Utf8Text
+                });
         }
 
         std::uintmax_t parseUnsigned(std::wstring_view value)
@@ -415,12 +408,32 @@ namespace fluxora
 #endif
         }
 
-        std::wstring buildNexusAuthorizationHeader(const AppSettingsService& settings)
+        std::string nexusAuthUnavailableMessage(const AppSettingsService& settings)
         {
             const NexusModsStoredAuth auth = settings.loadNexusModsAuth();
-            if (!auth.linked || auth.protectedAccessToken.empty())
+            if (!auth.linked || (auth.protectedAccessToken.empty() && auth.protectedApiKey.empty()))
+            {
+                return "NexusMods account is not linked. Connect NexusMods in settings.";
+            }
+
+            return "NexusMods authentication token is not available. Reconnect NexusMods in settings and try again.";
+        }
+
+        std::wstring buildNexusAuthHeader(const AppSettingsService& settings)
+        {
+            const NexusModsStoredAuth auth = settings.loadNexusModsAuth();
+            if (!auth.linked)
             {
                 return {};
+            }
+
+            if (!auth.protectedApiKey.empty())
+            {
+                const std::wstring apiKey = unprotectSecret(auth.protectedApiKey);
+                if (!apiKey.empty())
+                {
+                    return L"apikey: " + apiKey + L"\r\n";
+                }
             }
 
             const std::wstring accessToken = unprotectSecret(auth.protectedAccessToken);
@@ -429,7 +442,7 @@ namespace fluxora
                 return {};
             }
 
-            std::wstring tokenType = trim(auth.tokenType);
+            std::wstring tokenType = trimWhitespace(auth.tokenType);
             if (tokenType.empty())
             {
                 tokenType = L"Bearer";
@@ -479,6 +492,487 @@ namespace fluxora
                     return candidate;
                 }
             }
+        }
+
+        [[nodiscard]] std::uint64_t fnv1a(std::wstring_view value)
+        {
+            std::uint64_t hash = 14695981039346656037ull;
+            for (wchar_t character : value)
+            {
+                const auto code = static_cast<std::uint32_t>(character);
+                hash ^= code & 0xFFu;
+                hash *= 1099511628211ull;
+                hash ^= (code >> 8) & 0xFFu;
+                hash *= 1099511628211ull;
+                hash ^= (code >> 16) & 0xFFu;
+                hash *= 1099511628211ull;
+                hash ^= (code >> 24) & 0xFFu;
+                hash *= 1099511628211ull;
+            }
+
+            return hash;
+        }
+
+        [[nodiscard]] std::wstring hashText(std::wstring_view value)
+        {
+            std::wostringstream stream;
+            stream << std::hex << fnv1a(value);
+            return stream.str();
+        }
+
+        [[nodiscard]] std::wstring fileCacheFingerprint(const std::filesystem::path& path)
+        {
+            if (path.empty())
+            {
+                return {};
+            }
+
+            std::error_code sizeError;
+            const std::uintmax_t size = std::filesystem::file_size(path, sizeError);
+            std::error_code timeError;
+            const auto modified = std::filesystem::last_write_time(path, timeError);
+            const auto modifiedTicks = timeError
+                ? 0
+                : modified.time_since_epoch().count();
+            return hashText(
+                toLower(path.lexically_normal().wstring()) +
+                L"|" + std::to_wstring(sizeError ? 0 : size) +
+                L"|" + std::to_wstring(modifiedTicks));
+        }
+
+        [[nodiscard]] std::wstring fomodOutputCacheFingerprint(
+            const std::filesystem::path& path,
+            const std::vector<std::wstring>& selectedOptionIds)
+        {
+            std::wstring selectionKey;
+            for (const std::wstring& optionId : selectedOptionIds)
+            {
+                selectionKey.append(optionId);
+                selectionKey.push_back(L'\x1f');
+            }
+
+            return fileCacheFingerprint(path) + L"|fomodSelection=" + hashText(selectionKey);
+        }
+
+        [[nodiscard]] std::filesystem::path fomodPreviewCacheDirectory(
+            const std::filesystem::path& downloadsDirectory,
+            const std::filesystem::path& downloadPath,
+            std::wstring_view fallbackName)
+        {
+            std::error_code sizeError;
+            const std::uintmax_t size = std::filesystem::file_size(downloadPath, sizeError);
+            std::error_code timeError;
+            const auto modified = std::filesystem::last_write_time(downloadPath, timeError);
+            const auto modifiedTicks = timeError
+                ? 0
+                : modified.time_since_epoch().count();
+            const std::wstring key = toLower(downloadPath.wstring()) +
+                L"|" + std::to_wstring(sizeError ? 0 : size) +
+                L"|" + std::to_wstring(modifiedTicks);
+
+            std::wstring safeName = sanitizeFileName(fallbackName);
+            if (safeName.size() > 80)
+            {
+                safeName = safeName.substr(0, 80);
+            }
+            if (safeName.empty())
+            {
+                safeName = L"fomod";
+            }
+
+            return downloadsDirectory /
+                std::filesystem::path(L".fomod-previews") /
+                std::filesystem::path(safeName + L"-" + hashText(key));
+        }
+
+        [[nodiscard]] std::optional<std::filesystem::path> trySafeFomodPreviewRelativePath(std::wstring_view value)
+        {
+            std::wstring text = trim(std::wstring(value));
+            std::replace(text.begin(), text.end(), L'/', std::filesystem::path::preferred_separator);
+            const std::filesystem::path path(text);
+            if (path.empty() || path.is_absolute())
+            {
+                return std::nullopt;
+            }
+
+            const std::filesystem::path normalized = path.lexically_normal();
+            for (const auto& part : normalized)
+            {
+                if (part == L"..")
+                {
+                    return std::nullopt;
+                }
+            }
+
+            if (normalized == L".")
+            {
+                return std::nullopt;
+            }
+
+            return normalized;
+        }
+
+        [[nodiscard]] std::filesystem::path resolveFomodPreviewSource(
+            const std::filesystem::path& packageRoot,
+            const std::filesystem::path& relativePath)
+        {
+            const std::array candidates{
+                packageRoot / relativePath,
+                packageRoot / L"fomod" / relativePath,
+                packageRoot / L"FOMOD" / relativePath,
+                packageRoot / L"Fomod" / relativePath
+            };
+
+            for (const std::filesystem::path& candidate : candidates)
+            {
+                std::error_code error;
+                if (std::filesystem::is_regular_file(candidate, error))
+                {
+                    return candidate;
+                }
+            }
+
+            return {};
+        }
+
+        [[nodiscard]] bool hasFomodModuleConfig(const std::filesystem::path& root)
+        {
+            for (std::wstring_view folderName : {L"fomod", L"FOMOD", L"Fomod"})
+            {
+                const std::filesystem::path fomodDirectory = root / std::filesystem::path(folderName);
+                for (std::wstring_view configName : {L"ModuleConfig.xml", L"moduleconfig.xml", L"ModuleConfig.XML"})
+                {
+                    std::error_code error;
+                    if (std::filesystem::is_regular_file(
+                            fomodDirectory / std::filesystem::path(configName),
+                            error))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        [[nodiscard]] std::filesystem::path fomodPreviewPackageRoot(const std::filesystem::path& packageDirectory)
+        {
+            if (hasFomodModuleConfig(packageDirectory))
+            {
+                return packageDirectory;
+            }
+
+            std::error_code iteratorError;
+            for (const auto& entry : std::filesystem::directory_iterator(packageDirectory, iteratorError))
+            {
+                if (!entry.is_directory())
+                {
+                    continue;
+                }
+
+                if (hasFomodModuleConfig(entry.path()))
+                {
+                    return entry.path();
+                }
+            }
+
+            return packageDirectory;
+        }
+
+        [[nodiscard]] std::wstring materializeFomodPreviewImage(
+            const std::filesystem::path& packageRoot,
+            const std::filesystem::path& previewDirectory,
+            std::wstring_view imagePath,
+            std::size_t index)
+        {
+            std::optional<std::filesystem::path> relativePath = trySafeFomodPreviewRelativePath(imagePath);
+            if (!relativePath.has_value())
+            {
+                return {};
+            }
+
+            const std::filesystem::path source = resolveFomodPreviewSource(packageRoot, relativePath.value());
+            if (source.empty())
+            {
+                return {};
+            }
+
+            try
+            {
+                std::filesystem::create_directories(previewDirectory);
+                std::wstring fileName = sanitizeFileName(source.filename().wstring());
+                if (fileName.empty())
+                {
+                    fileName = L"preview";
+                }
+
+                const std::filesystem::path target = previewDirectory /
+                    std::filesystem::path(std::to_wstring(index) + L"-" + fileName);
+                std::filesystem::copy_file(source, target, std::filesystem::copy_options::overwrite_existing);
+                return std::filesystem::absolute(target).wstring();
+            }
+            catch (const std::exception&)
+            {
+                return {};
+            }
+        }
+
+        [[nodiscard]] std::size_t materializeFomodPreviewImages(
+            FomodInstallerDescriptor& descriptor,
+            const std::filesystem::path& packageRoot,
+            const std::filesystem::path& previewDirectory)
+        {
+            std::size_t copied = 0;
+            std::size_t index = 0;
+
+            if (!descriptor.moduleImagePath.empty())
+            {
+                descriptor.moduleImagePath = materializeFomodPreviewImage(
+                    packageRoot,
+                    previewDirectory,
+                    descriptor.moduleImagePath,
+                    ++index);
+                if (!descriptor.moduleImagePath.empty())
+                {
+                    copied++;
+                }
+            }
+
+            for (FomodStep& step : descriptor.steps)
+            {
+                for (FomodGroup& group : step.groups)
+                {
+                    for (FomodOption& option : group.options)
+                    {
+                        if (option.imagePath.empty())
+                        {
+                            continue;
+                        }
+
+                        option.imagePath = materializeFomodPreviewImage(
+                            packageRoot,
+                            previewDirectory,
+                            option.imagePath,
+                            ++index);
+                        if (!option.imagePath.empty())
+                        {
+                            copied++;
+                        }
+                    }
+                }
+            }
+
+            return copied;
+        }
+
+        std::filesystem::path nativeDeletePath(const std::filesystem::path& path)
+        {
+#ifdef _WIN32
+            std::wstring text = std::filesystem::absolute(path).lexically_normal().wstring();
+            if (text.rfind(LR"(\\?\)", 0) == 0)
+            {
+                return std::filesystem::path(text);
+            }
+
+            if (text.rfind(LR"(\\)", 0) == 0)
+            {
+                return std::filesystem::path(LR"(\\?\UNC\)" + text.substr(2));
+            }
+
+            return std::filesystem::path(LR"(\\?\)" + text);
+#else
+            return path;
+#endif
+        }
+
+        void clearReadonlyAttribute(const std::filesystem::path& path)
+        {
+#ifdef _WIN32
+            const std::filesystem::path nativePath = nativeDeletePath(path);
+            const DWORD attributes = GetFileAttributesW(nativePath.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_READONLY) == 0)
+            {
+                return;
+            }
+
+            SetFileAttributesW(nativePath.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY);
+#else
+            (void)path;
+#endif
+        }
+
+        void removePathWithRetry(const std::filesystem::path& path)
+        {
+            constexpr int maxAttempts = 3;
+
+            for (int attempt = 0; attempt < maxAttempts; ++attempt)
+            {
+                clearReadonlyAttribute(path);
+                const std::filesystem::path nativePath = nativeDeletePath(path);
+                std::error_code removeError;
+                const bool removed = std::filesystem::remove(nativePath, removeError);
+                std::error_code existsError;
+                if (!removeError &&
+                    (removed || !std::filesystem::exists(nativePath, existsError)))
+                {
+                    return;
+                }
+
+                if (attempt + 1 < maxAttempts)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                    continue;
+                }
+
+                const std::string reason = removeError
+                    ? removeError.message()
+                    : "path still exists";
+                throw std::runtime_error(
+                    "Failed to delete \"" + toUtf8(path.wstring()) + "\": " + reason);
+            }
+        }
+
+        std::size_t pathDepth(const std::filesystem::path& path)
+        {
+            return static_cast<std::size_t>(
+                std::distance(path.begin(), path.end()));
+        }
+
+        void sortDirectoriesDeepestFirst(std::vector<std::filesystem::path>& directories)
+        {
+            std::sort(directories.begin(), directories.end(), [](const auto& left, const auto& right)
+            {
+                const std::size_t leftDepth = pathDepth(left);
+                const std::size_t rightDepth = pathDepth(right);
+                if (leftDepth != rightDepth)
+                {
+                    return leftDepth > rightDepth;
+                }
+
+                return left.wstring().size() > right.wstring().size();
+            });
+        }
+
+        void removeDirectoryTreeWithRetry(const std::filesystem::path& directory)
+        {
+            const std::filesystem::path nativeRoot = nativeDeletePath(directory);
+            std::error_code statusError;
+            const std::filesystem::file_status rootStatus = std::filesystem::symlink_status(nativeRoot, statusError);
+            if (statusError || !std::filesystem::exists(rootStatus))
+            {
+                return;
+            }
+
+            const bool isRootDirectory = std::filesystem::is_directory(rootStatus) &&
+                !std::filesystem::is_symlink(rootStatus);
+            if (!isRootDirectory)
+            {
+                removePathWithRetry(nativeRoot);
+                return;
+            }
+
+            clearReadonlyAttribute(nativeRoot);
+
+            std::vector<std::filesystem::path> files;
+            std::vector<std::filesystem::path> directories;
+            std::error_code iterateError;
+            std::filesystem::recursive_directory_iterator iterator(
+                nativeRoot,
+                std::filesystem::directory_options::skip_permission_denied,
+                iterateError);
+            if (iterateError)
+            {
+                throw std::runtime_error("Failed to scan temporary directory: " + iterateError.message());
+            }
+
+            const std::filesystem::recursive_directory_iterator end;
+            for (; iterator != end; iterator.increment(iterateError))
+            {
+                if (iterateError)
+                {
+                    throw std::runtime_error("Failed to scan temporary directory: " + iterateError.message());
+                }
+
+                const std::filesystem::path current = iterator->path();
+                std::error_code entryError;
+                const std::filesystem::file_status status = iterator->symlink_status(entryError);
+                if (entryError)
+                {
+                    throw std::runtime_error("Failed to inspect temporary item: " + entryError.message());
+                }
+
+                if (std::filesystem::is_directory(status) && !std::filesystem::is_symlink(status))
+                {
+                    directories.push_back(current);
+                }
+                else
+                {
+                    files.push_back(current);
+                }
+            }
+
+            for (const std::filesystem::path& file : files)
+            {
+                removePathWithRetry(file);
+            }
+
+            sortDirectoriesDeepestFirst(directories);
+            for (const std::filesystem::path& childDirectory : directories)
+            {
+                removePathWithRetry(childDirectory);
+            }
+
+            removePathWithRetry(nativeRoot);
+        }
+
+        void cleanupTemporaryDirectory(
+            const std::filesystem::path& directory,
+            const Logger& logger,
+            const char* category)
+        {
+            if (directory.empty())
+            {
+                return;
+            }
+
+            std::error_code lastError;
+            std::string lastException;
+            for (int attempt = 1; attempt <= 5; ++attempt)
+            {
+                lastError.clear();
+                lastException.clear();
+                try
+                {
+                    removeDirectoryTreeWithRetry(directory);
+                }
+                catch (const std::exception& exception)
+                {
+                    lastException = exception.what();
+                }
+
+                std::error_code existsError;
+                if (!std::filesystem::exists(nativeDeletePath(directory), existsError))
+                {
+                    return;
+                }
+
+                if (attempt < 5)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(60 * attempt));
+                }
+            }
+
+            std::string message = "Failed to remove temporary directory. path=\"" +
+                toUtf8(directory.wstring()) + "\"";
+            if (lastError)
+            {
+                message += ", error=\"" + lastError.message() + "\"";
+            }
+            if (!lastException.empty())
+            {
+                message += ", error=\"" + lastException + "\"";
+            }
+            logger.write(LogLevel::Warning, category, message);
         }
 
         std::wstring formatFileTime(const std::filesystem::file_time_type& fileTime)
@@ -654,6 +1148,29 @@ namespace fluxora
         std::wstring metadataPath(const std::filesystem::path& path)
         {
             return path.wstring() + std::wstring(metadataExtension);
+        }
+
+        bool isHex8(std::wstring_view value)
+        {
+            if (value.size() != 8)
+            {
+                return false;
+            }
+
+            return std::all_of(value.begin(), value.end(), [](wchar_t character)
+            {
+                return (character >= L'0' && character <= L'9') ||
+                    (character >= L'a' && character <= L'f') ||
+                    (character >= L'A' && character <= L'F');
+            });
+        }
+
+        bool isAtomicBackupFile(const std::filesystem::path& path)
+        {
+            const std::wstring name = path.filename().wstring();
+            return name.size() == 11 &&
+                name.rfind(L".fb", 0) == 0 &&
+                isHex8(std::wstring_view(name).substr(3));
         }
 
         std::wstring cancelMarkerPath(const std::filesystem::path& path)
@@ -943,9 +1460,47 @@ namespace fluxora
                 extension) != supportedArchiveExtensions.end();
         }
 
+        bool isKnownGameArchiveExtension(std::wstring_view extension)
+        {
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+
+            const std::wstring normalizedExtension = toLower(std::wstring(extension));
+            for (const GameDefinition& definition : registry.definitions())
+            {
+                const auto match = std::find_if(
+                    definition.archiveExtensions.begin(),
+                    definition.archiveExtensions.end(),
+                    [&normalizedExtension](const NormalizedExtension& candidate)
+                    {
+                        return candidate.value() == normalizedExtension;
+                    });
+                if (match != definition.archiveExtensions.end())
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         bool hasSupportedArchiveExtension(std::wstring_view fileName)
         {
             return isSupportedArchiveExtension(archiveExtensionFromFileName(fileName));
+        }
+
+        bool hasSupportedDownloadFileExtension(std::wstring_view fileName)
+        {
+            const std::wstring extension = archiveExtensionFromFileName(fileName);
+            if (isSupportedArchiveExtension(extension))
+            {
+                return true;
+            }
+
+            return std::find(
+                rawModArchiveExtensions.begin(),
+                rawModArchiveExtensions.end(),
+                extension) != rawModArchiveExtensions.end() ||
+                isKnownGameArchiveExtension(extension);
         }
 
         std::wstring percentDecodeUtf8(std::wstring_view value)
@@ -1428,6 +1983,96 @@ namespace fluxora
             for (const std::filesystem::path& child : children)
             {
                 std::filesystem::rename(child, destinationDirectory / child.filename());
+            }
+        }
+
+        void copyDirectoryContentsOverwriting(
+            const std::filesystem::path& sourceDirectory,
+            const std::filesystem::path& destinationDirectory)
+        {
+            const PathSafetyService safety;
+            safety.validateDirectoryWriteRoot(destinationDirectory)
+                .throwIfUnsafe("Mod merge destination is unsafe");
+            std::filesystem::create_directories(destinationDirectory);
+
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(sourceDirectory))
+            {
+                safety.validateContainedPath(sourceDirectory, entry.path())
+                    .throwIfUnsafe("Mod merge source path is unsafe");
+                const std::filesystem::path relativePath = std::filesystem::relative(entry.path(), sourceDirectory);
+                const std::filesystem::path destinationPath = destinationDirectory / relativePath;
+
+                if (entry.is_directory())
+                {
+                    safety.validateWritePath(destinationDirectory, destinationPath)
+                        .throwIfUnsafe("Mod merge directory target is unsafe");
+                    if (std::filesystem::exists(destinationPath) &&
+                        !std::filesystem::is_directory(destinationPath))
+                    {
+                        std::filesystem::remove(destinationPath);
+                    }
+                    std::filesystem::create_directories(destinationPath);
+                    continue;
+                }
+
+                if (!entry.is_regular_file())
+                {
+                    continue;
+                }
+
+                std::filesystem::create_directories(destinationPath.parent_path());
+                if (std::filesystem::is_directory(destinationPath))
+                {
+                    std::filesystem::remove_all(destinationPath);
+                }
+
+                std::error_code sizeError;
+                const std::uintmax_t bytes = entry.file_size(sizeError);
+                safety.validateWritePath(
+                    destinationDirectory,
+                    destinationPath,
+                    PathSafetyWriteOptions{sizeError ? 0 : bytes, false})
+                    .throwIfUnsafe("Mod merge file target is unsafe");
+                std::filesystem::copy_file(
+                    entry.path(),
+                    destinationPath,
+                    std::filesystem::copy_options::overwrite_existing);
+            }
+        }
+
+        void replaceDirectoryWithStaging(
+            const std::filesystem::path& stagingDirectory,
+            const std::filesystem::path& targetDirectory,
+            const std::filesystem::path& modsDirectory,
+            std::wstring_view safeName)
+        {
+            std::filesystem::path backupDirectory;
+            if (std::filesystem::exists(targetDirectory))
+            {
+                backupDirectory = uniquePath(
+                    modsDirectory,
+                    L"." + std::wstring(safeName) + L".replacing");
+                std::filesystem::rename(targetDirectory, backupDirectory);
+            }
+
+            try
+            {
+                std::filesystem::rename(stagingDirectory, targetDirectory);
+            }
+            catch (const std::exception&)
+            {
+                if (!backupDirectory.empty() && !std::filesystem::exists(targetDirectory))
+                {
+                    std::error_code restoreError;
+                    std::filesystem::rename(backupDirectory, targetDirectory, restoreError);
+                }
+                throw;
+            }
+
+            if (!backupDirectory.empty())
+            {
+                std::error_code cleanupError;
+                std::filesystem::remove_all(backupDirectory, cleanupError);
             }
         }
 
@@ -1917,6 +2562,16 @@ namespace fluxora
             return trimWhitespace(std::move(value));
         }
 
+        std::string nexusHttpErrorMessage(DWORD statusCode)
+        {
+            if (statusCode == 401)
+            {
+                return "Nexus request returned HTTP 401. Reconnect NexusMods in settings and try again.";
+            }
+
+            return "Nexus request returned HTTP " + std::to_string(statusCode) + ".";
+        }
+
         std::string winHttpGet(const std::wstring& url, std::wstring_view extraHeaders = {})
         {
             URL_COMPONENTS components{};
@@ -2005,7 +2660,7 @@ namespace fluxora
                 WinHttpCloseHandle(request);
                 WinHttpCloseHandle(connection);
                 WinHttpCloseHandle(session);
-                throw std::runtime_error("Nexus request returned HTTP " + std::to_string(statusCode) + ".");
+                throw std::runtime_error(nexusHttpErrorMessage(statusCode));
             }
 
             std::string body;
@@ -2453,6 +3108,327 @@ namespace fluxora
             return isSupportedArchiveExtension(archiveExtension(path));
         }
 
+        std::uint16_t readLittleEndian16(const std::vector<unsigned char>& bytes, std::size_t offset)
+        {
+            if (offset + 2 > bytes.size())
+            {
+                throw std::runtime_error("Archive metadata is truncated.");
+            }
+
+            return static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(bytes[offset]) |
+                (static_cast<std::uint16_t>(bytes[offset + 1]) << 8));
+        }
+
+        std::uint32_t readLittleEndian32(const std::vector<unsigned char>& bytes, std::size_t offset)
+        {
+            if (offset + 4 > bytes.size())
+            {
+                throw std::runtime_error("Archive metadata is truncated.");
+            }
+
+            return static_cast<std::uint32_t>(
+                static_cast<std::uint32_t>(bytes[offset]) |
+                (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+                (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+                (static_cast<std::uint32_t>(bytes[offset + 3]) << 24));
+        }
+
+        std::uint64_t readLittleEndian64(const std::vector<unsigned char>& bytes, std::size_t offset)
+        {
+            if (offset + 8 > bytes.size())
+            {
+                throw std::runtime_error("Archive metadata is truncated.");
+            }
+
+            return static_cast<std::uint64_t>(readLittleEndian32(bytes, offset)) |
+                (static_cast<std::uint64_t>(readLittleEndian32(bytes, offset + 4)) << 32);
+        }
+
+        std::uint64_t binaryFileSize(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            const std::uintmax_t size = std::filesystem::file_size(path, error);
+            if (error)
+            {
+                throw std::runtime_error("Failed to read archive size.");
+            }
+
+            return static_cast<std::uint64_t>(size);
+        }
+
+        std::vector<unsigned char> readBinaryFileRange(
+            const std::filesystem::path& path,
+            std::uint64_t offset,
+            std::uint64_t size)
+        {
+            std::ifstream file(path, std::ios::in | std::ios::binary);
+            if (!file)
+            {
+                throw std::runtime_error("Failed to open archive.");
+            }
+
+            if (offset > static_cast<std::uint64_t>((std::numeric_limits<std::streamoff>::max)()) ||
+                size > static_cast<std::uint64_t>((std::numeric_limits<std::streamsize>::max)()))
+            {
+                throw std::runtime_error("Archive metadata is too large.");
+            }
+
+            file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            if (!file)
+            {
+                throw std::runtime_error("Failed to seek archive metadata.");
+            }
+
+            std::vector<unsigned char> bytes(static_cast<std::size_t>(size));
+            if (!bytes.empty())
+            {
+                file.read(
+                    reinterpret_cast<char*>(bytes.data()),
+                    static_cast<std::streamsize>(bytes.size()));
+                if (file.gcount() != static_cast<std::streamsize>(bytes.size()))
+                {
+                    throw std::runtime_error("Archive metadata is truncated.");
+                }
+            }
+
+            return bytes;
+        }
+
+        std::wstring zipEntryNameFromBytes(
+            const std::vector<unsigned char>& bytes,
+            std::size_t offset,
+            std::uint16_t length,
+            bool isUtf8)
+        {
+            if (offset + length > bytes.size())
+            {
+                throw std::runtime_error("Archive entry metadata is truncated.");
+            }
+
+            std::string name(
+                reinterpret_cast<const char*>(bytes.data() + offset),
+                reinterpret_cast<const char*>(bytes.data() + offset + length));
+
+            if (isUtf8)
+            {
+                try
+                {
+                    return fromUtf8(name);
+                }
+                catch (const std::exception&)
+                {
+                    throw std::runtime_error("Archive contains a file name that is not valid UTF-8.");
+                }
+            }
+
+            return std::wstring(name.begin(), name.end());
+        }
+
+        bool isDirectoryArchiveEntry(std::wstring_view path)
+        {
+            return !path.empty() && (path.back() == L'/' || path.back() == L'\\');
+        }
+
+        void validateSafeArchiveEntryPath(
+            std::wstring entryPath,
+            bool isDirectory,
+            std::set<std::wstring>& seenEntryKeys)
+        {
+            std::replace(entryPath.begin(), entryPath.end(), L'\\', L'/');
+            const std::filesystem::path path(entryPath);
+            const PathSafetyService safety;
+            const PathSafetyResult validation = safety.validateArchiveEntryPath(path, isDirectory);
+            if (!validation.safe())
+            {
+                throw std::runtime_error("Archive contains an unsafe file path.");
+            }
+
+            const std::wstring key = safety.archiveEntryComparisonKey(validation.normalizedRelativePath);
+
+            if (!isDirectory && !seenEntryKeys.insert(key).second)
+            {
+                throw std::runtime_error("Archive contains duplicate file paths that differ only by case.");
+            }
+        }
+
+        std::size_t findZipEndOfCentralDirectory(const std::vector<unsigned char>& bytes)
+        {
+            if (bytes.size() < 22)
+            {
+                throw std::runtime_error("ZIP archive metadata is truncated.");
+            }
+
+            const std::size_t searchStart = bytes.size() > 65557 ? bytes.size() - 65557 : 0;
+            for (std::size_t offset = bytes.size() - 22;; --offset)
+            {
+                if (readLittleEndian32(bytes, offset) == 0x06054B50)
+                {
+                    return offset;
+                }
+
+                if (offset == searchStart)
+                {
+                    break;
+                }
+            }
+
+            throw std::runtime_error("ZIP archive metadata was not found.");
+        }
+
+        struct ZipCentralDirectoryLocation
+        {
+            std::uint64_t offset{0};
+            std::uint64_t size{0};
+            std::uint64_t entryCount{0};
+        };
+
+        ZipCentralDirectoryLocation zipCentralDirectoryLocation(
+            const std::filesystem::path& archivePath,
+            const std::vector<unsigned char>& eocdBytes,
+            std::size_t eocd,
+            std::uint64_t absoluteEocd)
+        {
+            ZipCentralDirectoryLocation location{
+                readLittleEndian32(eocdBytes, eocd + 16),
+                readLittleEndian32(eocdBytes, eocd + 12),
+                readLittleEndian16(eocdBytes, eocd + 10)
+            };
+
+            const bool needsZip64 =
+                location.entryCount == 0xFFFF ||
+                location.size == 0xFFFFFFFF ||
+                location.offset == 0xFFFFFFFF;
+            if (!needsZip64)
+            {
+                return location;
+            }
+
+            if (absoluteEocd < 20)
+            {
+                throw std::runtime_error("ZIP64 archive locator was not found.");
+            }
+
+            const std::vector<unsigned char> locator =
+                readBinaryFileRange(archivePath, absoluteEocd - 20, 20);
+            if (readLittleEndian32(locator, 0) != 0x07064B50)
+            {
+                throw std::runtime_error("ZIP64 archive locator was not found.");
+            }
+
+            const std::uint64_t zip64EocdOffset = readLittleEndian64(locator, 8);
+            const std::vector<unsigned char> zip64Eocd =
+                readBinaryFileRange(archivePath, zip64EocdOffset, 56);
+            if (zip64Eocd.size() < 56)
+            {
+                throw std::runtime_error("ZIP64 archive metadata is invalid.");
+            }
+
+            if (readLittleEndian32(zip64Eocd, 0) != 0x06064B50)
+            {
+                throw std::runtime_error("ZIP64 archive metadata is invalid.");
+            }
+
+            location.entryCount = readLittleEndian64(zip64Eocd, 32);
+            location.size = readLittleEndian64(zip64Eocd, 40);
+            location.offset = readLittleEndian64(zip64Eocd, 48);
+            return location;
+        }
+
+        void validateZipArchiveEntryPaths(const std::filesystem::path& archivePath)
+        {
+            constexpr std::uint64_t maxEocdSearchBytes = 65557;
+            const std::uint64_t archiveSize = binaryFileSize(archivePath);
+            const std::uint64_t tailSize = (std::min)(archiveSize, maxEocdSearchBytes);
+            const std::uint64_t tailOffset = archiveSize - tailSize;
+            const std::vector<unsigned char> tail =
+                readBinaryFileRange(archivePath, tailOffset, tailSize);
+            const std::size_t eocd = findZipEndOfCentralDirectory(tail);
+            const std::uint64_t absoluteEocd = tailOffset + static_cast<std::uint64_t>(eocd);
+            const ZipCentralDirectoryLocation location =
+                zipCentralDirectoryLocation(archivePath, tail, eocd, absoluteEocd);
+
+            if (location.offset > archiveSize || location.size > archiveSize - location.offset)
+            {
+                throw std::runtime_error("ZIP archive central directory is invalid.");
+            }
+
+            if (location.size > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()))
+            {
+                throw std::runtime_error("ZIP archive central directory is invalid.");
+            }
+
+            const std::vector<unsigned char> centralDirectory =
+                readBinaryFileRange(archivePath, location.offset, location.size);
+            const std::size_t centralEnd = centralDirectory.size();
+
+            std::set<std::wstring> seenEntryKeys;
+            std::size_t offset = 0;
+            for (std::uint64_t index = 0; index < location.entryCount; ++index)
+            {
+                if (offset + 46 > centralEnd || readLittleEndian32(centralDirectory, offset) != 0x02014B50)
+                {
+                    throw std::runtime_error("ZIP archive central directory is invalid.");
+                }
+
+                const std::uint16_t flags = readLittleEndian16(centralDirectory, offset + 8);
+                const std::uint16_t nameLength = readLittleEndian16(centralDirectory, offset + 28);
+                const std::uint16_t extraLength = readLittleEndian16(centralDirectory, offset + 30);
+                const std::uint16_t commentLength = readLittleEndian16(centralDirectory, offset + 32);
+                const std::size_t nameOffset = offset + 46;
+                const std::size_t nextOffset = nameOffset + nameLength + extraLength + commentLength;
+                if (nextOffset > centralEnd)
+                {
+                    throw std::runtime_error("ZIP archive central directory is invalid.");
+                }
+
+                const std::wstring entryName = zipEntryNameFromBytes(
+                    centralDirectory,
+                    nameOffset,
+                    nameLength,
+                    (flags & 0x0800) != 0);
+                validateSafeArchiveEntryPath(entryName, isDirectoryArchiveEntry(entryName), seenEntryKeys);
+
+                offset = nextOffset;
+            }
+        }
+
+        void validateArchiveEntryPaths(const std::filesystem::path& archivePath)
+        {
+            if (archiveExtension(archivePath) == L".zip")
+            {
+                validateZipArchiveEntryPaths(archivePath);
+            }
+        }
+
+        void validateExtractedDirectoryTree(const std::filesystem::path& destinationDirectory)
+        {
+            const PathSafetyService safety;
+            safety.validateDirectoryWriteRoot(destinationDirectory)
+                .throwIfUnsafe("Archive extraction destination is unsafe");
+
+            std::error_code iterateError;
+            std::filesystem::recursive_directory_iterator iterator(
+                destinationDirectory,
+                std::filesystem::directory_options::skip_permission_denied,
+                iterateError);
+            const std::filesystem::recursive_directory_iterator end;
+            for (; iterator != end; iterator.increment(iterateError))
+            {
+                if (iterateError)
+                {
+                    throw std::runtime_error("Failed to validate extracted archive paths: " + iterateError.message());
+                }
+
+                safety.validateContainedPath(destinationDirectory, iterator->path())
+                    .throwIfUnsafe("Archive extraction produced an unsafe path");
+            }
+            if (iterateError)
+            {
+                throw std::runtime_error("Failed to validate extracted archive paths: " + iterateError.message());
+            }
+        }
+
         std::wstring directoryWithTrailingSlash(const std::filesystem::path& directory)
         {
             std::wstring value = directory.wstring();
@@ -2574,23 +3550,195 @@ namespace fluxora
                 return false;
             }
 
+            validateArchiveEntryPaths(archivePath);
+
             if (tryExtractWith7Zip(archivePath, destinationDirectory))
             {
+                validateExtractedDirectoryTree(destinationDirectory);
                 return true;
             }
 
             if (archiveExtension(archivePath) == L".rar" &&
                 tryExtractWithWinRar(archivePath, destinationDirectory))
             {
+                validateExtractedDirectoryTree(destinationDirectory);
                 return true;
             }
 
             if (tryExtractWithTar(archivePath, destinationDirectory))
             {
+                validateExtractedDirectoryTree(destinationDirectory);
                 return true;
             }
 
             throw std::runtime_error("Failed to extract archive. Install 7-Zip or WinRAR, or place 7z.exe next to FluxoraModding.exe.");
+        }
+
+        [[nodiscard]] ContentLayoutInstallMode contentLayoutInstallMode(ExistingModInstallMode mode)
+        {
+            switch (mode)
+            {
+            case ExistingModInstallMode::Replace:
+                return ContentLayoutInstallMode::Replace;
+            case ExistingModInstallMode::Merge:
+                return ContentLayoutInstallMode::Merge;
+            case ExistingModInstallMode::FailIfExists:
+            default:
+                return ContentLayoutInstallMode::Standard;
+            }
+        }
+
+        [[nodiscard]] std::string installModeName(ExistingModInstallMode mode)
+        {
+            switch (mode)
+            {
+            case ExistingModInstallMode::Replace:
+                return "replace";
+            case ExistingModInstallMode::Merge:
+                return "merge";
+            case ExistingModInstallMode::FailIfExists:
+            default:
+                return "standard";
+            }
+        }
+
+        [[nodiscard]] std::string contentLayoutBlockerMessage(const PlacementPlan& plan)
+        {
+            for (const ValidationFinding& finding : plan.validationFindings)
+            {
+                if (finding.blocksInstall)
+                {
+                    return toUtf8(finding.message);
+                }
+            }
+
+            return plan.userExplanation.summary.empty()
+                ? "Content layout could not be applied."
+                : toUtf8(plan.userExplanation.summary);
+        }
+
+        void logContentLayoutPlan(Logger& logger, const PlacementPlan& plan)
+        {
+            logger.write(
+                plan.canInstall() ? LogLevel::Info : LogLevel::Warning,
+                "Content layout analyzed. game=\"" + toUtf8(plan.gameId.value()) +
+                    "\", entries=" + std::to_string(plan.summary.totalEntries) +
+                    ", planned=" + std::to_string(plan.summary.plannedEntries) +
+                    ", plugins=" + std::to_string(plan.summary.pluginEntries) +
+                    ", archives=" + std::to_string(plan.summary.archiveEntries) +
+                    ", scriptExtender=" + std::to_string(plan.summary.scriptExtenderEntries) +
+                    ", unknown=" + std::to_string(plan.summary.unknownEntries) +
+                    ", unsafe=" + std::to_string(plan.summary.unsafeEntries) +
+                    ", blockers=" + std::to_string(plan.summary.hasBlockers ? 1 : 0) + ".");
+
+            for (const ValidationFinding& finding : plan.validationFindings)
+            {
+                std::string message = "Content layout finding: " + toUtf8(finding.message);
+                if (finding.path.has_value())
+                {
+                    message += " path=\"" + toUtf8(finding.path->path().generic_wstring()) + "\"";
+                }
+
+                logger.write(finding.blocksInstall ? LogLevel::Warning : LogLevel::Info, message);
+            }
+        }
+
+        [[nodiscard]] std::vector<std::wstring> fomodGameDataFoldersForProject(
+            const std::filesystem::path& projectDirectory)
+        {
+            const std::wstring gameId = InstanceMetadataStore::gameId(projectDirectory);
+            if (gameId.empty())
+            {
+                return {};
+            }
+
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(gameId);
+            if (!lookup.supported || lookup.support == nullptr)
+            {
+                return {};
+            }
+
+            const GameSupportComponents& components = lookup.support->components();
+            if (components.contentLayoutRulesProvider == nullptr)
+            {
+                return {};
+            }
+
+            const ContentLayoutSupportRules& rules =
+                components.contentLayoutRulesProvider->contentLayoutRules();
+            return rules.dataFolder.empty()
+                ? std::vector<std::wstring>{}
+                : std::vector<std::wstring>{rules.dataFolder};
+        }
+
+        [[nodiscard]] PlacementPlan analyzeContentLayoutForStaging(
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& stagingDirectory,
+            ExistingModInstallMode existingModMode,
+            bool hasFomodOutput,
+            std::wstring archiveContentHash,
+            Logger& logger)
+        {
+            const std::wstring gameId = InstanceMetadataStore::gameId(projectDirectory);
+            if (gameId.empty())
+            {
+                throw std::invalid_argument("Project does not have a selected game for content layout rules.");
+            }
+
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(gameId);
+            if (!lookup.supported || lookup.support == nullptr || lookup.definition == nullptr)
+            {
+                throw std::invalid_argument("Selected game is not supported by Fluxora content layout rules.");
+            }
+
+            const GameSupportComponents& components = lookup.support->components();
+            if (components.contentLayoutRulesProvider == nullptr ||
+                !lookup.support->capabilities().has(GameCapability::ContentLayoutRules))
+            {
+                throw std::invalid_argument("Selected game does not support content layout rules.");
+            }
+
+            ContentLayoutService layout;
+            ContentLayoutAnalysisRequest request;
+            request.selectedGameId = lookup.support->identity().id;
+            request.selectedGameDisplayName = lookup.support->identity().displayName;
+            request.selectedGameCapabilities = lookup.support->capabilities();
+            request.rulesProvider = components.contentLayoutRulesProvider;
+            request.installMode = contentLayoutInstallMode(existingModMode);
+            request.hasFomodOutput = hasFomodOutput;
+            request.archiveContentHash = std::move(archiveContentHash);
+            request.gameDefinitionVersion = lookup.definition->definitionVersion;
+            request.logger = &logger;
+
+            const PlacementPlan plan = layout.analyzeDirectory(stagingDirectory, request);
+            logContentLayoutPlan(logger, plan);
+            return plan;
+        }
+
+        void applyContentLayoutToStaging(
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& stagingDirectory,
+            ExistingModInstallMode existingModMode,
+            bool hasFomodOutput,
+            std::wstring archiveContentHash,
+            Logger& logger)
+        {
+            ContentLayoutService layout;
+            const PlacementPlan plan = analyzeContentLayoutForStaging(
+                projectDirectory,
+                stagingDirectory,
+                existingModMode,
+                hasFomodOutput,
+                std::move(archiveContentHash),
+                logger);
+            if (!plan.canInstall())
+            {
+                throw std::invalid_argument(contentLayoutBlockerMessage(plan));
+            }
+
+            layout.applyPlanToDirectory(stagingDirectory, plan);
         }
 
         std::wstring fetchNexusModName(
@@ -2608,8 +3756,8 @@ namespace fluxora
 #else
             try
             {
-                const std::wstring authorizationHeader = buildNexusAuthorizationHeader(settings);
-                if (authorizationHeader.empty())
+                const std::wstring authHeader = buildNexusAuthHeader(settings);
+                if (authHeader.empty())
                 {
                     return {};
                 }
@@ -2618,7 +3766,7 @@ namespace fluxora
                     L"https://api.nexusmods.com/v1/games/" + percentEncode(request.gameDomain) +
                     L"/mods/" + percentEncode(request.modId) +
                     L".json";
-                const JsonValue root = JsonReader::parse(fromUtf8(winHttpGet(endpoint, authorizationHeader)));
+                const JsonValue root = JsonReader::parse(fromUtf8(winHttpGet(endpoint, authHeader)));
                 if (!root.isObject())
                 {
                     return {};
@@ -2657,8 +3805,8 @@ namespace fluxora
             NexusFileInfo info;
             try
             {
-                const std::wstring authorizationHeader = buildNexusAuthorizationHeader(settings);
-                if (authorizationHeader.empty())
+                const std::wstring authHeader = buildNexusAuthHeader(settings);
+                if (authHeader.empty())
                 {
                     return {};
                 }
@@ -2668,7 +3816,7 @@ namespace fluxora
                     L"/mods/" + percentEncode(request.modId) +
                     L"/files/" + percentEncode(request.fileId) +
                     L".json";
-                info.payloadJson = fromUtf8(winHttpGet(endpoint, authorizationHeader));
+                info.payloadJson = fromUtf8(winHttpGet(endpoint, authHeader));
                 const JsonValue root = JsonReader::parse(info.payloadJson);
                 if (!root.isObject())
                 {
@@ -2728,9 +3876,7 @@ namespace fluxora
         {
             if (request.gameDomain.empty() ||
                 request.modId.empty() ||
-                request.fileId.empty() ||
-                request.key.empty() ||
-                request.expires.empty())
+                request.fileId.empty())
             {
                 return {};
             }
@@ -2738,20 +3884,24 @@ namespace fluxora
 #ifndef _WIN32
             throw std::runtime_error("Nexus downloads are currently implemented for Windows builds.");
 #else
-            const std::wstring endpoint =
+            std::wstring endpoint =
                 L"https://api.nexusmods.com/v1/games/" + percentEncode(request.gameDomain) +
                 L"/mods/" + percentEncode(request.modId) +
                 L"/files/" + percentEncode(request.fileId) +
-                L"/download_link.json?key=" + percentEncode(request.key) +
-                L"&expires=" + percentEncode(request.expires);
-
-            const std::wstring authorizationHeader = buildNexusAuthorizationHeader(settings);
-            if (authorizationHeader.empty())
+                L"/download_link.json";
+            if (!request.key.empty() && !request.expires.empty())
             {
-                throw std::runtime_error("NexusMods account is not linked. Connect NexusMods in settings.");
+                endpoint += L"?key=" + percentEncode(request.key) +
+                    L"&expires=" + percentEncode(request.expires);
             }
 
-            const std::string body = winHttpGet(endpoint, authorizationHeader);
+            const std::wstring authHeader = buildNexusAuthHeader(settings);
+            if (authHeader.empty())
+            {
+                throw std::runtime_error(nexusAuthUnavailableMessage(settings));
+            }
+
+            const std::string body = winHttpGet(endpoint, authHeader);
             const JsonValue root = JsonReader::parse(fromUtf8(body));
 
             auto readUri = [](const JsonValue& value) -> std::wstring
@@ -2958,7 +4108,8 @@ namespace fluxora
             const std::wstring pathText = entry.path().wstring();
             if (pathText.ends_with(metadataExtension) ||
                 pathText.ends_with(transientFileExtension) ||
-                pathText.ends_with(partialDownloadExtension))
+                pathText.ends_with(partialDownloadExtension) ||
+                isAtomicBackupFile(entry.path()))
             {
                 continue;
             }
@@ -3116,10 +4267,24 @@ namespace fluxora
             throw std::invalid_argument("Download file does not exist.");
         }
 
+        if (!hasSupportedDownloadFileExtension(sourcePath.filename().wstring()))
+        {
+            throw std::invalid_argument("Download file type is not supported.");
+        }
+
         const std::filesystem::path directory = pathSettings_.downloadsDirectory(projectDirectory);
+        PathSafetyService().validateDirectoryWriteRoot(directory)
+            .throwIfUnsafe("Downloads directory is unsafe");
         std::filesystem::create_directories(directory);
 
         const std::filesystem::path destinationPath = uniquePath(directory, sourcePath.filename().wstring());
+        std::error_code sizeError;
+        const std::uintmax_t bytes = std::filesystem::file_size(sourcePath, sizeError);
+        PathSafetyService().validateWritePath(
+            directory,
+            destinationPath,
+            PathSafetyWriteOptions{sizeError ? 0 : bytes, false})
+            .throwIfUnsafe("Imported download path is unsafe");
         std::filesystem::copy_file(sourcePath, destinationPath);
         DownloadMetadata metadata;
         metadata.version = versionFromArchiveFileName(destinationPath, destinationPath.stem().wstring());
@@ -3160,6 +4325,9 @@ namespace fluxora
         std::filesystem::remove(downloadPath);
         std::filesystem::remove(metadataPath(downloadPath));
         std::filesystem::remove(cancelMarkerPath(downloadPath));
+        std::filesystem::remove(AtomicFileStore::backupPathFor(downloadPath));
+        std::filesystem::remove(AtomicFileStore::backupPathFor(metadataPath(downloadPath)));
+        std::filesystem::remove(AtomicFileStore::backupPathFor(cancelMarkerPath(downloadPath)));
     }
 
     void DownloadService::cancelDownload(
@@ -3293,7 +4461,8 @@ namespace fluxora
     InstalledMod DownloadService::installDownload(
         const std::filesystem::path& projectDirectory,
         const std::filesystem::path& downloadPath,
-        std::wstring_view modName) const
+        std::wstring_view modName,
+        ExistingModInstallMode existingModMode) const
     {
         if (downloadPath.empty() || !std::filesystem::exists(downloadPath) || !std::filesystem::is_regular_file(downloadPath))
         {
@@ -3320,16 +4489,45 @@ namespace fluxora
         {
             throw std::invalid_argument("Mod name is required.");
         }
+        const std::wstring selectedGameId = InstanceMetadataStore::gameId(projectDirectory);
+        logger_.writeOperation(
+            LogLevel::Info,
+            "ModInstall",
+            "installMod requested kind=\"archive\", selectedGameId=\"" + toUtf8(selectedGameId) +
+                "\", installMode=\"" + installModeName(existingModMode) +
+                "\", downloadPath=\"" + toUtf8(downloadPath.wstring()) +
+                "\", requestedName=\"" + toUtf8(requestedName) +
+                "\", safeName=\"" + toUtf8(safeName) +
+                "\", source=\"" + toUtf8(metadata.source) +
+                "\", gameDomain=\"" + toUtf8(metadata.gameDomain) +
+                "\", modId=\"" + toUtf8(metadata.modId) +
+                "\", fileId=\"" + toUtf8(metadata.fileId) +
+                "\", versionResult=\"" +
+                (metadata.version.empty() ? std::string("metadata-unavailable") : toUtf8(metadata.version)) + "\".");
 
         const std::filesystem::path modsDirectory = pathSettings_.modsDirectory(projectDirectory);
         const std::filesystem::path targetDirectory = modsDirectory / std::filesystem::path(safeName);
-        if (std::filesystem::exists(targetDirectory))
+        const bool targetExists = std::filesystem::exists(targetDirectory);
+        if (targetExists && existingModMode == ExistingModInstallMode::FailIfExists)
         {
             throw std::invalid_argument("Mod is already installed.");
         }
+        if (targetExists &&
+            existingModMode == ExistingModInstallMode::Merge &&
+            !std::filesystem::is_directory(targetDirectory))
+        {
+            throw std::invalid_argument("Existing mod path is not a directory.");
+        }
 
+        const PathSafetyService safety;
+        safety.validateDirectoryWriteRoot(modsDirectory)
+            .throwIfUnsafe("Mods directory is unsafe");
+        safety.validateWritePath(modsDirectory, targetDirectory)
+            .throwIfUnsafe("Installed mod target path is unsafe");
         std::filesystem::create_directories(modsDirectory);
         const std::filesystem::path stagingDirectory = uniquePath(modsDirectory, L"." + safeName + L".installing");
+        safety.validateWritePath(modsDirectory, stagingDirectory)
+            .throwIfUnsafe("Installed mod staging path is unsafe");
         std::filesystem::create_directories(stagingDirectory);
 
         bool extracted = false;
@@ -3346,11 +4544,49 @@ namespace fluxora
                 flattenRedundantModRootDirectory(stagingDirectory, safeName);
             }
 
+            applyContentLayoutToStaging(
+                projectDirectory,
+                stagingDirectory,
+                existingModMode,
+                false,
+                fileCacheFingerprint(downloadPath),
+                logger_);
             detectedVersion = detectInstalledModVersion(stagingDirectory, downloadPath, metadata, safeName);
-            std::filesystem::rename(stagingDirectory, targetDirectory);
+            switch (existingModMode)
+            {
+            case ExistingModInstallMode::Replace:
+                replaceDirectoryWithStaging(stagingDirectory, targetDirectory, modsDirectory, safeName);
+                logger_.write(LogLevel::Info, "Installed download by replacing existing mod: " + toUtf8(safeName));
+                break;
+            case ExistingModInstallMode::Merge:
+                if (targetExists)
+                {
+                    copyDirectoryContentsOverwriting(stagingDirectory, targetDirectory);
+                    std::filesystem::remove_all(stagingDirectory);
+                    logger_.write(LogLevel::Info, "Installed download by merging into existing mod: " + toUtf8(safeName));
+                }
+                else
+                {
+                    std::filesystem::rename(stagingDirectory, targetDirectory);
+                    logger_.write(LogLevel::Info, "Installed download with merge mode into new mod: " + toUtf8(safeName));
+                }
+                break;
+            case ExistingModInstallMode::FailIfExists:
+            default:
+                std::filesystem::rename(stagingDirectory, targetDirectory);
+                logger_.write(LogLevel::Info, "Installed download as new mod: " + toUtf8(safeName));
+                break;
+            }
         }
-        catch (const std::exception&)
+        catch (const std::exception& exception)
         {
+            logger_.writeOperation(
+                LogLevel::Error,
+                "ModInstall",
+                "installMod failed kind=\"archive\", selectedGameId=\"" + toUtf8(selectedGameId) +
+                    "\", safeName=\"" + toUtf8(safeName) +
+                    "\", stagingDirectory=\"" + toUtf8(stagingDirectory.wstring()) +
+                    "\", reason=\"" + exception.what() + "\".");
             std::filesystem::remove_all(stagingDirectory);
             throw;
         }
@@ -3380,6 +4616,491 @@ namespace fluxora
             safeName,
             detectedVersion,
             source);
+
+        logger_.writeOperation(
+            LogLevel::Info,
+            "ModInstall",
+            "installMod completed kind=\"archive\", selectedGameId=\"" + toUtf8(selectedGameId) +
+                "\", safeName=\"" + toUtf8(safeName) +
+                "\", targetDirectory=\"" + toUtf8(targetDirectory.wstring()) +
+                "\", installMode=\"" + installModeName(existingModMode) +
+                "\", versionResult=\"" +
+                (detectedVersion.empty() ? std::string("unknown") : toUtf8(detectedVersion)) + "\".");
+
+        return InstalledMod{
+            record.path,
+            record.displayName,
+            record.version.empty() ? L"Unknown" : record.version,
+            record.state == L"installed"
+        };
+    }
+
+    PlacementPlan DownloadService::analyzeDownloadContentLayout(
+        const std::filesystem::path& projectDirectory,
+        const std::filesystem::path& downloadPath,
+        ExistingModInstallMode existingModMode) const
+    {
+        if (downloadPath.empty() || !std::filesystem::exists(downloadPath) || !std::filesystem::is_regular_file(downloadPath))
+        {
+            throw std::invalid_argument("Download file does not exist.");
+        }
+
+        if (downloadPath.extension().wstring() == pendingNxmExtension)
+        {
+            throw std::invalid_argument("Download is not ready to analyze.");
+        }
+
+        const DownloadMetadata metadata = readMetadata(downloadPath);
+        if (metadata.isDownloading)
+        {
+            throw std::invalid_argument("Download is still in progress.");
+        }
+
+        const BuildPathSettings paths = pathSettings_.loadForProjectDirectory(projectDirectory);
+        const std::wstring fallbackName = trim(metadata.nexusModName).empty()
+            ? downloadPath.stem().wstring()
+            : trim(metadata.nexusModName);
+        const std::wstring safeName = sanitizeFileName(fallbackName).empty()
+            ? L"download"
+            : sanitizeFileName(fallbackName);
+        const std::filesystem::path analysisDirectory = uniquePath(
+            paths.downloadsDirectory,
+            L".layout-analysis-" + safeName);
+
+        const PathSafetyService safety;
+        safety.validateWritePath(paths.downloadsDirectory, analysisDirectory)
+            .throwIfUnsafe("Content layout analysis path is unsafe");
+        std::filesystem::create_directories(analysisDirectory);
+
+        try
+        {
+            const bool extracted = extractArchiveToDirectory(downloadPath, analysisDirectory);
+            if (!extracted)
+            {
+                std::filesystem::copy_file(downloadPath, analysisDirectory / downloadPath.filename());
+            }
+            else
+            {
+                flattenRedundantModRootDirectory(analysisDirectory, safeName);
+            }
+
+            PlacementPlan plan = analyzeContentLayoutForStaging(
+                projectDirectory,
+                analysisDirectory,
+                existingModMode,
+                false,
+                fileCacheFingerprint(downloadPath),
+                logger_);
+            cleanupTemporaryDirectory(analysisDirectory, logger_, "ContentLayout");
+            return plan;
+        }
+        catch (const std::exception&)
+        {
+            cleanupTemporaryDirectory(analysisDirectory, logger_, "ContentLayout");
+            throw;
+        }
+    }
+
+    FomodInstallerDescriptor DownloadService::analyzeFomodDownload(
+        const std::filesystem::path& projectDirectory,
+        const std::filesystem::path& downloadPath) const
+    {
+        if (downloadPath.empty() || !std::filesystem::exists(downloadPath) || !std::filesystem::is_regular_file(downloadPath))
+        {
+            throw std::invalid_argument("Download file does not exist.");
+        }
+
+        if (downloadPath.extension().wstring() == pendingNxmExtension)
+        {
+            return {};
+        }
+
+        const DownloadMetadata metadata = readMetadata(downloadPath);
+        if (metadata.isDownloading)
+        {
+            return {};
+        }
+
+        const BuildPathSettings paths = pathSettings_.loadForProjectDirectory(projectDirectory);
+        const std::wstring fallbackName = trim(metadata.nexusModName).empty()
+            ? downloadPath.stem().wstring()
+            : trim(metadata.nexusModName);
+        const std::filesystem::path packageDirectory = uniquePath(
+            paths.downloadsDirectory,
+            L".fomod-analysis-" + sanitizeFileName(fallbackName));
+        std::filesystem::create_directories(packageDirectory);
+
+        try
+        {
+            if (!extractArchiveToDirectory(downloadPath, packageDirectory))
+            {
+                cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+                return {};
+            }
+
+            const FomodPackageIdentity identity{
+                !metadata.gameDomain.empty() ? L"nexus" : (metadata.source.empty() ? L"local" : L"manual"),
+                metadata.gameDomain,
+                metadata.modId,
+                metadata.fileId,
+                metadata.source.empty() ? downloadPath.wstring() : metadata.source,
+                fallbackName
+            };
+
+            FomodInstallerDescriptor descriptor = FomodInstallerService::analyze(
+                projectDirectory,
+                paths.gameDirectory,
+                paths.modsDirectory,
+                packageDirectory,
+                identity,
+                fomodGameDataFoldersForProject(projectDirectory));
+            const std::filesystem::path previewDirectory = fomodPreviewCacheDirectory(
+                paths.downloadsDirectory,
+                downloadPath,
+                fallbackName);
+            std::error_code previewCleanupError;
+            std::filesystem::remove_all(previewDirectory, previewCleanupError);
+            const std::size_t previewCount = materializeFomodPreviewImages(
+                descriptor,
+                fomodPreviewPackageRoot(packageDirectory),
+                previewDirectory);
+            if (previewCount > 0)
+            {
+                logger_.write(
+                    LogLevel::Info,
+                    "Cached FOMOD preview images. count=" + std::to_string(previewCount) +
+                        ", path=\"" + toUtf8(previewDirectory.wstring()) + "\"");
+            }
+            cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+            return descriptor;
+        }
+        catch (const std::exception&)
+        {
+            cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+            throw;
+        }
+    }
+
+    PlacementPlan DownloadService::analyzeFomodDownloadContentLayout(
+        const std::filesystem::path& projectDirectory,
+        const std::filesystem::path& downloadPath,
+        ExistingModInstallMode existingModMode,
+        const std::vector<std::wstring>& selectedOptionIds) const
+    {
+        if (downloadPath.empty() || !std::filesystem::exists(downloadPath) || !std::filesystem::is_regular_file(downloadPath))
+        {
+            throw std::invalid_argument("Download file does not exist.");
+        }
+
+        if (downloadPath.extension().wstring() == pendingNxmExtension)
+        {
+            throw std::invalid_argument("Download is not ready to analyze.");
+        }
+
+        const DownloadMetadata metadata = readMetadata(downloadPath);
+        if (metadata.isDownloading)
+        {
+            throw std::invalid_argument("Download is still in progress.");
+        }
+
+        const BuildPathSettings paths = pathSettings_.loadForProjectDirectory(projectDirectory);
+        const std::wstring fallbackName = trim(metadata.nexusModName).empty()
+            ? downloadPath.stem().wstring()
+            : trim(metadata.nexusModName);
+        const std::wstring safeName = sanitizeFileName(fallbackName).empty()
+            ? L"fomod"
+            : sanitizeFileName(fallbackName);
+        const std::filesystem::path packageDirectory = uniquePath(
+            paths.downloadsDirectory,
+            L".fomod-layout-analysis-" + safeName);
+        const std::filesystem::path stagingDirectory = uniquePath(
+            paths.downloadsDirectory,
+            L".fomod-layout-output-" + safeName);
+
+        const PathSafetyService safety;
+        safety.validateWritePath(paths.downloadsDirectory, packageDirectory)
+            .throwIfUnsafe("FOMOD package analysis path is unsafe");
+        safety.validateWritePath(paths.downloadsDirectory, stagingDirectory)
+            .throwIfUnsafe("FOMOD output analysis path is unsafe");
+        std::filesystem::create_directories(packageDirectory);
+        std::filesystem::create_directories(stagingDirectory);
+
+        try
+        {
+            if (!extractArchiveToDirectory(downloadPath, packageDirectory))
+            {
+                throw std::invalid_argument("Download does not contain an XML FOMOD installer.");
+            }
+
+            const FomodPackageIdentity identity{
+                !metadata.gameDomain.empty() ? L"nexus" : (metadata.source.empty() ? L"local" : L"manual"),
+                metadata.gameDomain,
+                metadata.modId,
+                metadata.fileId,
+                metadata.source.empty() ? downloadPath.wstring() : metadata.source,
+                safeName
+            };
+
+            const FomodInstallerDescriptor descriptor = FomodInstallerService::analyze(
+                projectDirectory,
+                paths.gameDirectory,
+                paths.modsDirectory,
+                packageDirectory,
+                identity,
+                fomodGameDataFoldersForProject(projectDirectory));
+            if (!descriptor.isFomod)
+            {
+                throw std::invalid_argument("Download does not contain an XML FOMOD installer.");
+            }
+
+            (void)FomodInstallerService::install(FomodInstallContext{
+                projectDirectory,
+                paths.gameDirectory,
+                paths.modsDirectory,
+                packageDirectory,
+                stagingDirectory,
+                identity,
+                selectedOptionIds,
+                fomodGameDataFoldersForProject(projectDirectory)
+            });
+
+            PlacementPlan plan = analyzeContentLayoutForStaging(
+                projectDirectory,
+                stagingDirectory,
+                existingModMode,
+                true,
+                fomodOutputCacheFingerprint(downloadPath, selectedOptionIds),
+                logger_);
+            cleanupTemporaryDirectory(stagingDirectory, logger_, "FOMOD");
+            cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+            return plan;
+        }
+        catch (const std::exception&)
+        {
+            cleanupTemporaryDirectory(stagingDirectory, logger_, "FOMOD");
+            cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+            throw;
+        }
+    }
+
+    InstalledMod DownloadService::installFomodDownload(
+        const std::filesystem::path& projectDirectory,
+        const std::filesystem::path& downloadPath,
+        std::wstring_view modName,
+        ExistingModInstallMode existingModMode,
+        const std::vector<std::wstring>& selectedOptionIds) const
+    {
+        if (downloadPath.empty() || !std::filesystem::exists(downloadPath) || !std::filesystem::is_regular_file(downloadPath))
+        {
+            throw std::invalid_argument("Download file does not exist.");
+        }
+
+        if (downloadPath.extension().wstring() == pendingNxmExtension)
+        {
+            throw std::invalid_argument("Download is not ready to install.");
+        }
+
+        DownloadMetadata metadata = readMetadata(downloadPath);
+        if (metadata.isDownloading)
+        {
+            throw std::invalid_argument("Download is still in progress.");
+        }
+
+        const std::wstring requestedName = trim(std::wstring(modName));
+        const std::wstring installName = requestedName.empty()
+            ? metadata.nexusModName
+            : requestedName;
+        std::wstring safeName = sanitizeFileName(installName);
+        if (safeName.empty())
+        {
+            throw std::invalid_argument("Mod name is required.");
+        }
+        const std::wstring selectedGameId = InstanceMetadataStore::gameId(projectDirectory);
+        logger_.writeOperation(
+            LogLevel::Info,
+            "ModInstall",
+            "installMod requested kind=\"fomod\", selectedGameId=\"" + toUtf8(selectedGameId) +
+                "\", installMode=\"" + installModeName(existingModMode) +
+                "\", downloadPath=\"" + toUtf8(downloadPath.wstring()) +
+                "\", requestedName=\"" + toUtf8(requestedName) +
+                "\", safeName=\"" + toUtf8(safeName) +
+                "\", source=\"" + toUtf8(metadata.source) +
+                "\", gameDomain=\"" + toUtf8(metadata.gameDomain) +
+                "\", modId=\"" + toUtf8(metadata.modId) +
+                "\", fileId=\"" + toUtf8(metadata.fileId) +
+                "\", selectedOptionCount=" + std::to_string(selectedOptionIds.size()) +
+                ", versionResult=\"" +
+                (metadata.version.empty() ? std::string("metadata-unavailable") : toUtf8(metadata.version)) + "\".");
+
+        const BuildPathSettings paths = pathSettings_.loadForProjectDirectory(projectDirectory);
+        const std::filesystem::path modsDirectory = paths.modsDirectory;
+        const std::filesystem::path targetDirectory = modsDirectory / std::filesystem::path(safeName);
+        const bool targetExists = std::filesystem::exists(targetDirectory);
+        if (targetExists && existingModMode == ExistingModInstallMode::FailIfExists)
+        {
+            throw std::invalid_argument("Mod is already installed.");
+        }
+        if (targetExists &&
+            existingModMode == ExistingModInstallMode::Merge &&
+            !std::filesystem::is_directory(targetDirectory))
+        {
+            throw std::invalid_argument("Existing mod path is not a directory.");
+        }
+
+        const PathSafetyService safety;
+        safety.validateDirectoryWriteRoot(modsDirectory)
+            .throwIfUnsafe("Mods directory is unsafe");
+        safety.validateWritePath(modsDirectory, targetDirectory)
+            .throwIfUnsafe("Installed FOMOD target path is unsafe");
+        std::filesystem::create_directories(modsDirectory);
+        const std::filesystem::path packageDirectory = uniquePath(
+            paths.downloadsDirectory,
+            L"fomod-install-" + safeName);
+        const std::filesystem::path stagingDirectory = uniquePath(modsDirectory, L"." + safeName + L".installing");
+        safety.validateWritePath(paths.downloadsDirectory, packageDirectory)
+            .throwIfUnsafe("FOMOD package path is unsafe");
+        safety.validateWritePath(modsDirectory, stagingDirectory)
+            .throwIfUnsafe("Installed FOMOD staging path is unsafe");
+        std::filesystem::create_directories(packageDirectory);
+        std::filesystem::create_directories(stagingDirectory);
+
+        std::wstring detectedVersion;
+        FomodInstallerDescriptor descriptor;
+        std::vector<std::wstring> appliedOptionIds;
+        try
+        {
+            if (!extractArchiveToDirectory(downloadPath, packageDirectory))
+            {
+                throw std::invalid_argument("Download does not contain an XML FOMOD installer.");
+            }
+
+            const FomodPackageIdentity identity{
+                !metadata.gameDomain.empty() ? L"nexus" : (metadata.source.empty() ? L"local" : L"manual"),
+                metadata.gameDomain,
+                metadata.modId,
+                metadata.fileId,
+                metadata.source.empty() ? downloadPath.wstring() : metadata.source,
+                safeName
+            };
+
+            descriptor = FomodInstallerService::analyze(
+                projectDirectory,
+                paths.gameDirectory,
+                paths.modsDirectory,
+                packageDirectory,
+                identity,
+                fomodGameDataFoldersForProject(projectDirectory));
+            if (!descriptor.isFomod)
+            {
+                throw std::invalid_argument("Download does not contain an XML FOMOD installer.");
+            }
+
+            appliedOptionIds = FomodInstallerService::install(FomodInstallContext{
+                projectDirectory,
+                paths.gameDirectory,
+                paths.modsDirectory,
+                packageDirectory,
+                stagingDirectory,
+                identity,
+                selectedOptionIds,
+                fomodGameDataFoldersForProject(projectDirectory)
+            });
+
+            applyContentLayoutToStaging(
+                projectDirectory,
+                stagingDirectory,
+                existingModMode,
+                true,
+                fomodOutputCacheFingerprint(downloadPath, selectedOptionIds),
+                logger_);
+
+            detectedVersion = trim(descriptor.moduleVersion);
+            if (detectedVersion.empty())
+            {
+                detectedVersion = detectInstalledModVersion(packageDirectory, downloadPath, metadata, safeName);
+            }
+
+            switch (existingModMode)
+            {
+            case ExistingModInstallMode::Replace:
+                replaceDirectoryWithStaging(stagingDirectory, targetDirectory, modsDirectory, safeName);
+                logger_.write(LogLevel::Info, "Installed FOMOD by replacing existing mod: " + toUtf8(safeName));
+                break;
+            case ExistingModInstallMode::Merge:
+                if (targetExists)
+                {
+                    copyDirectoryContentsOverwriting(stagingDirectory, targetDirectory);
+                    std::filesystem::remove_all(stagingDirectory);
+                    logger_.write(LogLevel::Info, "Installed FOMOD by merging into existing mod: " + toUtf8(safeName));
+                }
+                else
+                {
+                    std::filesystem::rename(stagingDirectory, targetDirectory);
+                    logger_.write(LogLevel::Info, "Installed FOMOD with merge mode into new mod: " + toUtf8(safeName));
+                }
+                break;
+            case ExistingModInstallMode::FailIfExists:
+            default:
+                std::filesystem::rename(stagingDirectory, targetDirectory);
+                logger_.write(LogLevel::Info, "Installed FOMOD as new mod: " + toUtf8(safeName));
+                break;
+            }
+
+            FomodInstallerService::rememberSelection(projectDirectory, descriptor, appliedOptionIds);
+            cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+        }
+        catch (const std::exception& exception)
+        {
+            logger_.writeOperation(
+                LogLevel::Error,
+                "ModInstall",
+                "installMod failed kind=\"fomod\", selectedGameId=\"" + toUtf8(selectedGameId) +
+                    "\", safeName=\"" + toUtf8(safeName) +
+                    "\", packageDirectory=\"" + toUtf8(packageDirectory.wstring()) +
+                    "\", stagingDirectory=\"" + toUtf8(stagingDirectory.wstring()) +
+                    "\", appliedPluginRules=\"fomod options=" + std::to_string(appliedOptionIds.size()) +
+                    "\", reason=\"" + exception.what() + "\".");
+            cleanupTemporaryDirectory(stagingDirectory, logger_, "FOMOD");
+            cleanupTemporaryDirectory(packageDirectory, logger_, "FOMOD");
+            throw;
+        }
+
+        metadata.version = detectedVersion;
+        if (metadata.latestVersion.empty())
+        {
+            metadata.latestVersion = detectedVersion;
+        }
+        metadata.installedModName = safeName;
+        metadata.installedAtUtc = nowUtcText();
+        metadata.status = L"Установлен FOMOD: " + safeName;
+        writeMetadata(downloadPath, metadata);
+
+        const ModSourceRecord source{
+            !metadata.gameDomain.empty() ? L"nexus" : (metadata.source.empty() ? L"local" : L"manual"),
+            metadata.gameDomain,
+            metadata.modId,
+            metadata.fileId,
+            metadata.source.empty() ? downloadPath.wstring() : metadata.source,
+            {},
+            metadata.latestVersion
+        };
+        const InstalledModRecord record = InstanceMetadataStore::registerInstalledMod(
+            projectDirectory,
+            targetDirectory,
+            safeName,
+            detectedVersion,
+            source);
+
+        logger_.writeOperation(
+            LogLevel::Info,
+            "ModInstall",
+            "installMod completed kind=\"fomod\", selectedGameId=\"" + toUtf8(selectedGameId) +
+                "\", safeName=\"" + toUtf8(safeName) +
+                "\", targetDirectory=\"" + toUtf8(targetDirectory.wstring()) +
+                "\", installMode=\"" + installModeName(existingModMode) +
+                "\", appliedPluginRules=\"fomod options=" + std::to_string(appliedOptionIds.size()) +
+                "\", versionResult=\"" +
+                (detectedVersion.empty() ? std::string("unknown") : toUtf8(detectedVersion)) + "\".");
 
         return InstalledMod{
             record.path,

@@ -1,5 +1,6 @@
 #include "FluxoraCore/Storage/InstanceMetadataStore.hpp"
 
+#include "FluxoraCore/Storage/AtomicFileStore.hpp"
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
@@ -37,6 +38,12 @@ namespace fluxora
     void InstanceMetadataStore::ensureInstance(
         const std::filesystem::path&,
         std::wstring_view)
+    {
+        throw std::runtime_error("Fluxora instance metadata storage requires SQLite on Windows.");
+    }
+
+    std::wstring InstanceMetadataStore::gameId(
+        const std::filesystem::path&)
     {
         throw std::runtime_error("Fluxora instance metadata storage requires SQLite on Windows.");
     }
@@ -218,6 +225,12 @@ namespace fluxora
 
         using SqliteDestructor = void (*)(void*);
 
+        std::mutex& metadataStoreMutex()
+        {
+            static std::mutex mutex;
+            return mutex;
+        }
+
         std::string toUtf8(const std::wstring& value)
         {
             if (value.empty())
@@ -295,20 +308,27 @@ namespace fluxora
                 std::istreambuf_iterator<char>());
         }
 
+        void recoverMetadataManifest(const std::filesystem::path& path)
+        {
+            static_cast<void>(AtomicFileStore().recoverFile(
+                path,
+                AtomicFileWriteOptions{
+                    L"generated mod metadata",
+                    ProjectStateValidation::JsonObject
+                }));
+        }
+
         void writeTextFile(const std::filesystem::path& path, const std::string& content)
         {
-            if (!path.parent_path().empty())
-            {
-                std::filesystem::create_directories(path.parent_path());
-            }
-
-            std::ofstream file(path, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!file)
-            {
-                throw std::runtime_error("Failed to write metadata manifest.");
-            }
-
-            file.write(content.data(), static_cast<std::streamsize>(content.size()));
+            AtomicFileStore().writeTextFile(
+                path,
+                content,
+                AtomicFileWriteOptions{
+                    L"generated mod metadata",
+                    ProjectStateValidation::JsonObject,
+                    {},
+                    false
+                });
         }
 
         std::wstring nowUtcText()
@@ -455,6 +475,7 @@ namespace fluxora
                 return std::nullopt;
             }
 
+            recoverMetadataManifest(path);
             const JsonValue root = JsonReader::parse(fromUtf8(readTextFile(path)));
             if (!root.isObject())
             {
@@ -474,6 +495,45 @@ namespace fluxora
             record.path = modDirectory;
             record.source = readSourceFromManifest(root);
             return record;
+        }
+
+        bool portableManifestNeedsWrite(const InstalledModRecord& record, bool stateChanged)
+        {
+            if (stateChanged)
+            {
+                return true;
+            }
+
+            try
+            {
+                const std::optional<InstalledModRecord> manifestRecord = readManifestRecord(record.path);
+                return !manifestRecord.has_value() || manifestRecord->state != record.state;
+            }
+            catch (const std::exception&)
+            {
+                return true;
+            }
+        }
+
+        bool portableManifestIsMissing(const InstalledModRecord& record)
+        {
+            std::error_code error;
+            return !std::filesystem::is_regular_file(manifestPathForMod(record.path), error);
+        }
+
+        bool portableManifestNeedsBulkWrite(const InstalledModRecord& record, bool stateChanged)
+        {
+            if (portableManifestIsMissing(record))
+            {
+                return true;
+            }
+
+            if (stateChanged)
+            {
+                return false;
+            }
+
+            return portableManifestNeedsWrite(record, false);
         }
 
         void mixHash(std::uint64_t& hash, std::uint64_t value)
@@ -584,6 +644,7 @@ namespace fluxora
             using ColumnInt64Fn = long long (__cdecl *)(sqlite3_stmt*, int);
             using LastInsertRowIdFn = long long (__cdecl *)(sqlite3*);
             using ErrmsgFn = const char* (__cdecl *)(sqlite3*);
+            using BusyTimeoutFn = int (__cdecl *)(sqlite3*, int);
             using FreeFn = void (__cdecl *)(void*);
 
             SqliteApi()
@@ -610,6 +671,7 @@ namespace fluxora
                 columnInt64 = load<ColumnInt64Fn>("sqlite3_column_int64");
                 lastInsertRowId = load<LastInsertRowIdFn>("sqlite3_last_insert_rowid");
                 errmsg = load<ErrmsgFn>("sqlite3_errmsg");
+                busyTimeout = load<BusyTimeoutFn>("sqlite3_busy_timeout");
                 free = load<FreeFn>("sqlite3_free");
             }
 
@@ -640,6 +702,7 @@ namespace fluxora
             ColumnInt64Fn columnInt64{};
             LastInsertRowIdFn lastInsertRowId{};
             ErrmsgFn errmsg{};
+            BusyTimeoutFn busyTimeout{};
             FreeFn free{};
 
         private:
@@ -664,6 +727,8 @@ namespace fluxora
             return api;
         }
 
+        constexpr int sqliteBusyTimeoutMs = 15000;
+
         std::string sqliteError(sqlite3* handle)
         {
             const char* message = sqlite().errmsg(handle);
@@ -685,10 +750,7 @@ namespace fluxora
 
             ~Statement()
             {
-                if (statement_ != nullptr)
-                {
-                    sqlite().finalize(statement_);
-                }
+                finalize();
             }
 
             Statement(const Statement&) = delete;
@@ -744,6 +806,7 @@ namespace fluxora
                 }
                 if (result == sqliteDone)
                 {
+                    finalize();
                     return false;
                 }
 
@@ -757,6 +820,8 @@ namespace fluxora
                 {
                     throw std::runtime_error(sqliteError(handle_));
                 }
+
+                finalize();
             }
 
             std::wstring columnText(int index) const
@@ -789,6 +854,15 @@ namespace fluxora
             }
 
         private:
+            void finalize() noexcept
+            {
+                if (statement_ != nullptr)
+                {
+                    sqlite().finalize(statement_);
+                    statement_ = nullptr;
+                }
+            }
+
             sqlite3* handle_{nullptr};
             sqlite3_stmt* statement_{nullptr};
         };
@@ -811,6 +885,15 @@ namespace fluxora
                         handle_ = nullptr;
                     }
 
+                    throw std::runtime_error(message);
+                }
+
+                const int timeoutResult = sqlite().busyTimeout(handle_, sqliteBusyTimeoutMs);
+                if (timeoutResult != sqliteOk)
+                {
+                    std::string message = sqliteError(handle_);
+                    sqlite().close(handle_);
+                    handle_ = nullptr;
                     throw std::runtime_error(message);
                 }
             }
@@ -909,7 +992,7 @@ namespace fluxora
 
         void ensureSchema(Database& database)
         {
-            database.exec("PRAGMA busy_timeout = 5000;");
+            database.exec("PRAGMA busy_timeout = 15000;");
             database.exec("PRAGMA foreign_keys = ON;");
             database.exec("PRAGMA journal_mode = WAL;");
             database.exec("PRAGMA synchronous = NORMAL;");
@@ -2213,6 +2296,37 @@ namespace fluxora
             }
         }
 
+        bool isTransientModDirectoryName(std::wstring_view folderName)
+        {
+            if (folderName.empty() || folderName.front() == L'.')
+            {
+                return true;
+            }
+
+            constexpr std::array<std::wstring_view, 3> suffixes{
+                L".fomod-package",
+                L".installing",
+                L".replacing"
+            };
+            for (std::wstring_view suffix : suffixes)
+            {
+                if (folderName.size() >= suffix.size() &&
+                    std::equal(
+                        suffix.rbegin(),
+                        suffix.rend(),
+                        folderName.rbegin(),
+                        [](wchar_t left, wchar_t right)
+                        {
+                            return std::towlower(left) == std::towlower(right);
+                        }))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         void syncInstalledModsFromDisk(
             Database& database,
             const std::filesystem::path& projectDirectory,
@@ -2236,7 +2350,7 @@ namespace fluxora
                 }
 
                 const std::wstring folderName = entry.path().filename().wstring();
-                if (folderName.empty() || folderName.front() == L'.')
+                if (isTransientModDirectoryName(folderName))
                 {
                     continue;
                 }
@@ -2292,6 +2406,8 @@ namespace fluxora
         const std::filesystem::path& projectDirectory,
         std::wstring_view gameId)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         Database database = openInstanceDatabase(projectDirectory);
 
         Transaction transaction(database);
@@ -2307,10 +2423,21 @@ namespace fluxora
         transaction.commit();
     }
 
+    std::wstring InstanceMetadataStore::gameId(
+        const std::filesystem::path& projectDirectory)
+    {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
+        Database database = openInstanceDatabase(projectDirectory);
+        return readMetadataValue(database, L"game_id");
+    }
+
     std::vector<InstalledModRecord> InstanceMetadataStore::listInstalledMods(
         const std::filesystem::path& projectDirectory,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         Database database = openInstanceDatabase(projectDirectory);
         syncInstalledModsFromDisk(database, projectDirectory, modsRoot);
         return readInstalledRecords(database, projectDirectory, modsRoot);
@@ -2321,6 +2448,8 @@ namespace fluxora
         std::wstring_view profileName,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2344,6 +2473,8 @@ namespace fluxora
         int targetIndex,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2399,6 +2530,8 @@ namespace fluxora
         std::wstring_view separatorId,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2435,6 +2568,8 @@ namespace fluxora
         int targetIndex,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2469,6 +2604,8 @@ namespace fluxora
         std::wstring_view profileName,
         const std::vector<ProfileOrderImportItemRecord>& items)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2524,8 +2661,13 @@ namespace fluxora
             }
 
             Statement select = database.prepare(
-                "SELECT id FROM mods WHERE folder_name = ? AND state IN ('installed', 'disabled') LIMIT 1;");
+                "SELECT id FROM mods "
+                "WHERE folder_name = ? COLLATE NOCASE "
+                "AND state IN ('installed', 'disabled') "
+                "ORDER BY folder_name = ? DESC "
+                "LIMIT 1;");
             select.bindText(1, folderName);
+            select.bindText(2, folderName);
             if (!select.stepRow())
             {
                 continue;
@@ -2555,6 +2697,8 @@ namespace fluxora
         std::wstring_view profileName,
         const std::vector<std::wstring>& pluginNames)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2575,6 +2719,8 @@ namespace fluxora
         std::wstring_view profileName,
         const std::vector<ProfilePluginOrderImportItemRecord>& items)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2655,6 +2801,8 @@ namespace fluxora
         std::wstring_view title,
         int targetIndex)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2709,6 +2857,8 @@ namespace fluxora
         const std::vector<std::wstring>& pluginNames,
         std::wstring_view separatorId)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2745,6 +2895,8 @@ namespace fluxora
         std::wstring_view orderItemId,
         int targetIndex)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2780,6 +2932,8 @@ namespace fluxora
         std::wstring_view version,
         const ModSourceRecord& source)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (modDirectory.empty() || !std::filesystem::exists(modDirectory) || !std::filesystem::is_directory(modDirectory))
         {
             throw std::invalid_argument("Installed mod directory is required.");
@@ -2813,6 +2967,8 @@ namespace fluxora
         const std::vector<InstalledModImportRecord>& mods,
         const InstalledModImportProgress& progress)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -2832,6 +2988,8 @@ namespace fluxora
         const std::wstring now = nowUtcText();
         std::vector<InstalledModRecord> records;
         records.reserve(mods.size());
+        std::vector<unsigned char> shouldComputeContentFingerprint;
+        shouldComputeContentFingerprint.reserve(mods.size());
 
         for (const InstalledModImportRecord& import : mods)
         {
@@ -2854,6 +3012,7 @@ namespace fluxora
             record.source = import.source;
 
             records.push_back(std::move(record));
+            shouldComputeContentFingerprint.push_back(import.computeContentFingerprint ? 1 : 0);
         }
 
         std::atomic<std::size_t> nextIndex{0};
@@ -2885,7 +3044,10 @@ namespace fluxora
 
                     try
                     {
-                        records[index].contentFingerprint = computeContentFingerprint(records[index].path);
+                        if (shouldComputeContentFingerprint[index])
+                        {
+                            records[index].contentFingerprint = computeContentFingerprint(records[index].path);
+                        }
                     }
                     catch (...)
                     {
@@ -2935,6 +3097,8 @@ namespace fluxora
         const std::filesystem::path& projectDirectory,
         const std::filesystem::path& modPath)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty() || modPath.empty())
         {
             throw std::invalid_argument("Project directory and mod path are required.");
@@ -2944,6 +3108,15 @@ namespace fluxora
         const std::wstring folderName = modPath.filename().wstring();
 
         Transaction transaction(database);
+        Statement id = database.prepare("SELECT id FROM mods WHERE folder_name = ? LIMIT 1;");
+        id.bindText(1, folderName);
+        if (id.stepRow())
+        {
+            Statement removeCache = database.prepare("DELETE FROM mod_file_cache WHERE mod_id = ?;");
+            removeCache.bindInt64(1, std::stoll(id.columnText(0)));
+            removeCache.stepDone();
+        }
+
         Statement statement = database.prepare(
             "UPDATE mods SET state = 'deleted', updated_at = ? WHERE folder_name = ?;");
         statement.bindText(1, nowUtcText());
@@ -2957,6 +3130,8 @@ namespace fluxora
         const std::filesystem::path& modPath,
         bool isEnabled)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty() || modPath.empty())
         {
             throw std::invalid_argument("Project directory and mod path are required.");
@@ -2971,21 +3146,31 @@ namespace fluxora
             throw std::invalid_argument("Only installed mods can be enabled or disabled.");
         }
 
-        record.state = isEnabled ? L"installed" : L"disabled";
-        record.updatedAt = nowUtcText();
+        const std::wstring nextState = isEnabled ? L"installed" : L"disabled";
+        const bool stateChanged = record.state != nextState;
+        if (stateChanged)
+        {
+            record.state = nextState;
+            record.updatedAt = nowUtcText();
 
-        Transaction transaction(database);
-        Statement statement = database.prepare(
-            "UPDATE mods SET state = ?, updated_at = ? "
-            "WHERE folder_name = ? AND state IN ('installed', 'disabled');");
-        statement.bindText(1, record.state);
-        statement.bindText(2, record.updatedAt);
-        statement.bindText(3, folderName);
-        statement.stepDone();
-        transaction.commit();
+            Transaction transaction(database);
+            Statement statement = database.prepare(
+                "UPDATE mods SET state = ?, updated_at = ? "
+                "WHERE folder_name = ? AND state IN ('installed', 'disabled') AND state <> ?;");
+            statement.bindText(1, record.state);
+            statement.bindText(2, record.updatedAt);
+            statement.bindText(3, folderName);
+            statement.bindText(4, record.state);
+            statement.stepDone();
+            transaction.commit();
 
-        record = readRecordByFolder(database, projectDirectory, folderName, modPath.parent_path());
-        writePortableManifest(record);
+            record = readRecordByFolder(database, projectDirectory, folderName, modPath.parent_path());
+        }
+
+        if (portableManifestNeedsWrite(record, stateChanged))
+        {
+            writePortableManifest(record);
+        }
     }
 
     void InstanceMetadataStore::setAllInstalledModsEnabled(
@@ -2993,6 +3178,8 @@ namespace fluxora
         bool isEnabled,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -3003,17 +3190,34 @@ namespace fluxora
 
         const std::wstring nextState = isEnabled ? L"installed" : L"disabled";
         const std::wstring updatedAt = nowUtcText();
+        std::vector<InstalledModRecord> records = readInstalledRecords(database, projectDirectory, modsRoot);
+        std::vector<InstalledModRecord> manifestsToWrite;
+        for (InstalledModRecord& record : records)
+        {
+            const bool stateChanged = record.state != nextState;
+            if (stateChanged)
+            {
+                record.state = nextState;
+                record.updatedAt = updatedAt;
+            }
+
+            if (portableManifestNeedsBulkWrite(record, stateChanged))
+            {
+                manifestsToWrite.push_back(record);
+            }
+        }
 
         Transaction transaction(database);
         Statement statement = database.prepare(
             "UPDATE mods SET state = ?, updated_at = ? "
-            "WHERE state IN ('installed', 'disabled');");
+            "WHERE state IN ('installed', 'disabled') AND state <> ?;");
         statement.bindText(1, nextState);
         statement.bindText(2, updatedAt);
+        statement.bindText(3, nextState);
         statement.stepDone();
         transaction.commit();
 
-        for (const InstalledModRecord& record : readInstalledRecords(database, projectDirectory, modsRoot))
+        for (const InstalledModRecord& record : manifestsToWrite)
         {
             writePortableManifest(record);
         }
@@ -3024,6 +3228,8 @@ namespace fluxora
         const RemoteCheckRecord& check,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -3100,6 +3306,8 @@ namespace fluxora
         const std::filesystem::path& modPath,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty() || modPath.empty())
         {
             throw std::invalid_argument("Project directory and mod path are required.");
@@ -3118,6 +3326,8 @@ namespace fluxora
         const std::filesystem::path& projectDirectory,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -3144,6 +3354,8 @@ namespace fluxora
         std::wstring_view profileName,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
@@ -3160,6 +3372,8 @@ namespace fluxora
         std::wstring_view relativeDirectory,
         const std::filesystem::path& modsRoot)
     {
+        const std::lock_guard metadataLock(metadataStoreMutex());
+
         if (projectDirectory.empty() || modPath.empty())
         {
             throw std::invalid_argument("Project directory and mod path are required.");
@@ -3180,10 +3394,14 @@ namespace fluxora
 
         Database database = openInstanceDatabase(projectDirectory);
         const std::filesystem::path resolvedModsRoot = modsRoot.empty() ? modPath.parent_path() : modsRoot;
-        ensureAllFileCachesFresh(database, projectDirectory, resolvedModsRoot);
+        syncInstalledModsFromDisk(database, projectDirectory, resolvedModsRoot);
 
         InstalledModRecord record =
             readRecordByFolder(database, projectDirectory, modPath.filename().wstring(), resolvedModsRoot);
+
+        Transaction transaction(database);
+        ensureFileCacheFresh(database, record);
+        transaction.commit();
 
         Statement statement = database.prepare(
             "SELECT name, relative_path, kind, size, path_key "

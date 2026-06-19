@@ -57,7 +57,10 @@ public sealed class PluginOrderDragDropService
     public void Attach()
     {
         listBox.AllowDrop = true;
-        listBox.PreviewMouseLeftButtonDown += OnPreviewMouseLeftButtonDown;
+        listBox.AddHandler(
+            Mouse.PreviewMouseDownEvent,
+            new MouseButtonEventHandler(OnPreviewMouseLeftButtonDown),
+            true);
         listBox.PreviewMouseLeftButtonUp += OnPreviewMouseLeftButtonUp;
         listBox.MouseMove += OnMouseMove;
         listBox.DragOver += OnDragOver;
@@ -75,19 +78,27 @@ public sealed class PluginOrderDragDropService
 
     private void OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (IsDragBlockedByInteractiveElement(e.OriginalSource as DependencyObject))
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        if (SelectionInputService.HasRangeSelectionModifier(Keyboard.Modifiers) ||
+            IsDragBlockedByInteractiveElement(e.OriginalSource as DependencyObject))
         {
             draggedItem = null;
             dragStartPoint = null;
             return;
         }
 
-        if (FindVisualParent<ListBoxItem>(e.OriginalSource as DependencyObject) is { DataContext: PluginEntry plugin } item &&
-            canStartDrag(plugin))
+        if (FindVisualParent<ListBoxItem>(e.OriginalSource as DependencyObject) is { DataContext: PluginEntry plugin } item)
         {
-            draggedItem = item;
-            dragStartPoint = e.GetPosition(listBox);
-            listBox.SelectedItem = plugin;
+            if (canStartDrag(plugin))
+            {
+                draggedItem = item;
+                dragStartPoint = e.GetPosition(listBox);
+            }
+
             return;
         }
 
@@ -503,7 +514,6 @@ public sealed class PluginOrderDragDropService
             TranslateTransform translate = EnsureTranslateTransform(item);
             translate.BeginAnimation(TranslateTransform.YProperty, null);
             translate.Y = deltaY;
-            item.CacheMode = new BitmapCache();
 
             DoubleAnimation animation = new(0, new Duration(ReorderAnimationDuration))
             {
@@ -512,7 +522,6 @@ public sealed class PluginOrderDragDropService
             animation.Completed += (_, _) =>
             {
                 translate.Y = 0;
-                item.CacheMode = null;
             };
             translate.BeginAnimation(TranslateTransform.YProperty, animation, HandoffBehavior.SnapshotAndReplace);
             ++animatedItems;
@@ -681,4 +690,5 @@ public sealed class PluginOrderDragDropService
     {
         return string.IsNullOrWhiteSpace(plugin.OrderId) ? plugin.Id : plugin.OrderId;
     }
+
 }

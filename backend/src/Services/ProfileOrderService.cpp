@@ -385,12 +385,7 @@ namespace fluxora
                 projectDirectory,
                 profileName,
                 pathSettings_.modsDirectory(projectDirectory));
-        return buildModOrder(
-            records,
-            InstanceMetadataStore::summarizeProfileModFiles(
-                projectDirectory,
-                profileName,
-                pathSettings_.modsDirectory(projectDirectory)));
+        return buildModOrder(records);
     }
 
     std::vector<ProfileModOrderItem> ProfileOrderService::createModSeparator(
@@ -411,12 +406,7 @@ namespace fluxora
                 title,
                 targetIndex,
                 pathSettings_.modsDirectory(projectDirectory));
-        return buildModOrder(
-            records,
-            InstanceMetadataStore::summarizeProfileModFiles(
-                projectDirectory,
-                profileName,
-                pathSettings_.modsDirectory(projectDirectory)));
+        return buildModOrder(records);
     }
 
     std::vector<ProfileModOrderItem> ProfileOrderService::deleteModSeparator(
@@ -435,12 +425,7 @@ namespace fluxora
                 profileName,
                 separatorId,
                 pathSettings_.modsDirectory(projectDirectory));
-        return buildModOrder(
-            records,
-            InstanceMetadataStore::summarizeProfileModFiles(
-                projectDirectory,
-                profileName,
-                pathSettings_.modsDirectory(projectDirectory)));
+        return buildModOrder(records);
     }
 
     std::vector<ProfileModOrderItem> ProfileOrderService::moveModOrderItem(
@@ -461,12 +446,7 @@ namespace fluxora
                 orderItemId,
                 targetIndex,
                 pathSettings_.modsDirectory(projectDirectory));
-        return buildModOrder(
-            records,
-            InstanceMetadataStore::summarizeProfileModFiles(
-                projectDirectory,
-                profileName,
-                pathSettings_.modsDirectory(projectDirectory)));
+        return buildModOrder(records);
     }
 
     bool ProfileOrderService::isInitialized() const noexcept

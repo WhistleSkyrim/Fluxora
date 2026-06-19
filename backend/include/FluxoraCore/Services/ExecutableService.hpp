@@ -1,8 +1,11 @@
 #pragma once
 
+#include "FluxoraCore/GameSupport/IGameSupport.hpp"
 #include "FluxoraCore/Services/IService.hpp"
 
 #include <filesystem>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +30,11 @@ namespace fluxora
         GameExecutable executable;
         std::filesystem::path resolvedExecutablePath;
         std::filesystem::path resolvedWorkingDirectory;
+        LaunchTrackingKind launchTrackingKind{LaunchTrackingKind::DirectProcess};
+        std::vector<std::wstring> expectedChildProcessNames;
+        std::wstring handoffDisplayName;
+        std::uint32_t handoffTimeoutMs{0};
+        std::uint32_t processId{0};
     };
 
     // Everything needed to start an executable, resolved from the build config but
@@ -41,9 +49,19 @@ namespace fluxora
         std::filesystem::path gamePath;
         std::filesystem::path rootBuilderLaunchCacheDirectory;
         std::filesystem::path projectDirectory;
+        GameId gameId;
+        std::wstring gameDisplayName;
+        std::wstring gameDefinitionVersion;
+        CapabilitySet gameCapabilities;
         std::wstring templateId;
         std::wstring dataDirectory;
         std::wstring defaultProfile;
+        std::optional<VfsSupportRules> vfsRules;
+        std::optional<ContentLayoutSupportRules> contentLayoutRules;
+        LaunchTrackingKind launchTrackingKind{LaunchTrackingKind::DirectProcess};
+        std::vector<std::wstring> expectedChildProcessNames;
+        std::wstring handoffDisplayName;
+        std::uint32_t handoffTimeoutMs{0};
     };
 
     class ExecutableService final : public IService

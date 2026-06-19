@@ -12,8 +12,11 @@
         WindowStartupLocation="CenterScreen"
         Icon="pack://application:,,,/Fluxora.ico"
         FontFamily="{StaticResource FluxoraFontBody}"
+        FontWeight="Medium"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
+        TextOptions.TextHintingMode="Fixed"
+        RenderOptions.ClearTypeHint="Enabled"
         SnapsToDevicePixels="True"
         UseLayoutRounding="True"
         SourceInitialized="OnSourceInitialized">

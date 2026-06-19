@@ -17,7 +17,7 @@ Fluxora kann folgende Daten lokal auf Ihrem Gerät speichern oder verarbeiten:
 - Einstellungen: Sprache, App-Konfiguration, Ordner für Build-Konfigurationen und weitere Präferenzen.
 - Projektdaten: Projektnamen, Spielpfade, Mod-Ordner, Profildateien, Plugin-Reihenfolge, Download-Einträge, importierte Mod Organizer Daten, ausführbare Dateien und zugehörige Metadaten.
 - Protokolle: Zeitstempel, Status von Vorgängen, Fehlermeldungen, ausgewählte Pfade, Dateinamen, Prozess- oder Thread-Kennungen und Diagnosedaten. Protokolle können indirekt Ihren Windows-Benutzernamen enthalten, wenn er Teil eines Dateipfads ist.
-- Nexus Mods Verbindungsdaten, falls Sie Nexus Mods verbinden: Anzeigename, Benutzer-ID, Token-Typ, Ablaufzeit und mit Windows Datenschutz-APIs geschützte Access- oder Refresh-Tokens, soweit verfügbar.
+- Nexus Mods Verbindungsdaten, falls Sie Nexus Mods verbinden: Anzeigename, Benutzer-ID, Token-Typ, Ablaufzeit, Access- oder Refresh-Tokens und persönliche API-Schlüssel, geschützt mit Windows Datenschutz-APIs, soweit verfügbar.
 - Lokale Protokoll-Links: nxm Links, die an Fluxora übergeben werden, wenn Sie Fluxora als Handler auswählen.
 
 Fluxora erhebt nicht absichtlich besondere Kategorien personenbezogener Daten, Zahlungsdaten, Werbe-IDs, Adressbücher, Browserverläufe, Mikrofon-, Kamera- oder Standortdaten.
@@ -37,6 +37,7 @@ Fluxora speichert Daten typischerweise lokal an folgenden Orten:
 - Installierte Anwendung: der von Ihnen gewählte Installationsordner.
 - Protokolle: ein logs Ordner neben der ausführbaren Datei, sofern beschreibbar, und/oder %APPDATA%\Fluxora\logs.
 - Einstellungen: %APPDATA%\Fluxora\settings.ini und %APPDATA%\Fluxora\settings.json.
+- Laufzeitstatus von Starts: %APPDATA%\Fluxora\launch-session.json, solange eine externe ausführbare Datei verfolgt wird.
 - Projektdateien: von Ihnen beim Erstellen oder Importieren gewählte Ordner.
 - Temporäres Installer-Paket: nur während der Installation im temporären Systemordner.
 
@@ -53,7 +54,7 @@ Fluxora verkauft keine personenbezogenen Daten und sendet keine Protokolle oder 
 Diese Dritten verarbeiten Daten nach ihren eigenen Bedingungen und Datenschutzhinweisen. Fluxora selbst übermittelt Daten nicht absichtlich von Ihrem Gerät, sofern Sie keine optionalen Online-Funktionen nutzen oder Protokolle manuell an den Support senden.
 
 9. Sicherheit
-Fluxora nutzt lokale Dateiberechtigungen von Windows und schützt Nexus Mods OAuth-Tokens mit Windows Datenschutz-APIs, soweit verfügbar. Keine Sicherheitsmaßnahme ist vollkommen. Sie sollten Ihr Windows-Konto, den Installationsordner und Backups schützen.
+Fluxora nutzt lokale Dateiberechtigungen von Windows und schützt Nexus Mods OAuth-Tokens und persönliche API-Schlüssel mit Windows Datenschutz-APIs, soweit verfügbar. Keine Sicherheitsmaßnahme ist vollkommen. Sie sollten Ihr Windows-Konto, den Installationsordner und Backups schützen.
 
 10. Ihre Rechte nach der DSGVO
 Vorbehaltlich der gesetzlichen Voraussetzungen können Ihnen Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit, Widerspruch und Widerruf einer Einwilligung zustehen. Da Fluxora die meisten Daten lokal auf Ihrem Gerät speichert, können Sie viele Rechte direkt ausüben, indem Sie Protokolle, Einstellungen, Projekte oder den Installationsordner löschen. Für Anfragen an den Verantwortlichen nutzen Sie den offiziellen Datenschutzkontakt von ModdingFlow.

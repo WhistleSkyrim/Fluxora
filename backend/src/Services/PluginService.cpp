@@ -1,7 +1,11 @@
 #include "FluxoraCore/Services/PluginService.hpp"
 
+#include "FluxoraCore/GameSupport/GameHealthCheckService.hpp"
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
+#include "FluxoraCore/GameSupport/GameTypes.hpp"
 #include "FluxoraCore/Services/BuildPathSettingsService.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
+#include "FluxoraCore/Storage/AtomicFileStore.hpp"
 #include "FluxoraCore/Storage/InstanceMetadataStore.hpp"
 
 #include <algorithm>
@@ -9,6 +13,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 
@@ -21,17 +26,13 @@ namespace fluxora
     namespace
     {
         constexpr std::wstring_view fallbackProfileName = L"Default";
-        constexpr std::wstring_view pluginsFileName = L"plugins.txt";
-        constexpr std::wstring_view loadOrderFileName = L"loadorder.txt";
-        constexpr std::wstring_view transientFileExtension = L".tmp";
-        constexpr std::wstring_view skyrimTemplateId = L"skyrimse";
         constexpr std::wstring_view pluginKind = L"plugin";
         constexpr std::wstring_view separatorKind = L"separator";
 
         struct DetectedPlugin
         {
             std::wstring name;
-            std::wstring extension;
+            NormalizedExtension extension;
             std::wstring sourceMod;
             bool sourceModEnabled{true};
         };
@@ -42,6 +43,18 @@ namespace fluxora
             bool isEnabled{true};
         };
 
+        struct ProfileModFolder
+        {
+            std::wstring folderName;
+            bool isEnabled{true};
+        };
+
+        struct PluginScanCacheEntry
+        {
+            std::wstring fingerprint;
+            std::map<std::wstring, DetectedPlugin> detected;
+        };
+
         std::wstring toLower(std::wstring value)
         {
             std::transform(value.begin(), value.end(), value.begin(), [](wchar_t character)
@@ -49,6 +62,40 @@ namespace fluxora
                 return static_cast<wchar_t>(std::towlower(character));
             });
             return value;
+        }
+
+        void pushUniquePath(std::vector<std::filesystem::path>& values, std::filesystem::path value)
+        {
+            const std::wstring key = toLower(value.lexically_normal().generic_wstring());
+            const auto match = std::find_if(
+                values.begin(),
+                values.end(),
+                [&key](const std::filesystem::path& candidate)
+                {
+                    return toLower(candidate.lexically_normal().generic_wstring()) == key;
+                });
+
+            if (match == values.end())
+            {
+                values.push_back(std::move(value));
+            }
+        }
+
+        void addExtensionKey(std::set<std::wstring>& keys, const NormalizedExtension& extension)
+        {
+            if (!extension.value().empty())
+            {
+                keys.insert(extension.value());
+            }
+        }
+
+        void addPathKey(std::set<std::wstring>& keys, const std::filesystem::path& path)
+        {
+            const std::wstring key = toAsciiLower(path.lexically_normal().generic_wstring());
+            if (!key.empty())
+            {
+                keys.insert(key);
+            }
         }
 
         std::wstring toUpper(std::wstring value)
@@ -77,66 +124,259 @@ namespace fluxora
             return toLower(std::wstring(left)) == toLower(std::wstring(right));
         }
 
-        bool isSkyrimTemplate(const BuildTemplate& resolvedTemplate)
+        [[nodiscard]] std::wstring profileFileNamed(
+            const std::vector<std::wstring>& profileFiles,
+            std::wstring_view fileName)
         {
-            return equalsIgnoreCase(resolvedTemplate.id, skyrimTemplateId);
+            const std::wstring requested = toLower(std::wstring(fileName));
+            const auto match = std::find_if(
+                profileFiles.begin(),
+                profileFiles.end(),
+                [&requested](const std::wstring& candidate)
+                {
+                    return toLower(std::filesystem::path(candidate).filename().wstring()) == requested;
+                });
+
+            return match == profileFiles.end() ? std::wstring() : *match;
         }
 
-        std::wstring normalizeExtension(std::filesystem::path path)
+        [[nodiscard]] std::vector<NormalizedExtension> normalizedExtensions(
+            const std::vector<std::wstring>& rawExtensions)
         {
-            return toLower(path.extension().wstring());
+            std::vector<NormalizedExtension> extensions;
+            extensions.reserve(rawExtensions.size());
+            for (const std::wstring& rawExtension : rawExtensions)
+            {
+                const GameTypeParseResult<NormalizedExtension> parsed = NormalizedExtension::parse(rawExtension);
+                if (parsed && std::find(extensions.begin(), extensions.end(), parsed.value()) == extensions.end())
+                {
+                    extensions.push_back(parsed.value());
+                }
+            }
+
+            return extensions;
+        }
+
+        [[nodiscard]] bool hasCapabilityId(const BuildTemplate& resolvedTemplate, std::wstring_view id)
+        {
+            return std::any_of(
+                resolvedTemplate.capabilities.begin(),
+                resolvedTemplate.capabilities.end(),
+                [id](const TemplateCapability& capability)
+                {
+                    return equalsIgnoreCase(capability.id, id);
+                });
+        }
+
+        [[nodiscard]] CapabilitySet capabilitiesFromTemplate(const BuildTemplate& resolvedTemplate)
+        {
+            CapabilitySet capabilities;
+            if (hasCapabilityId(resolvedTemplate, L"plugins"))
+            {
+                capabilities.enable(GameCapability::Plugins);
+            }
+            if (hasCapabilityId(resolvedTemplate, L"load-order"))
+            {
+                capabilities.enable(GameCapability::LoadOrder);
+            }
+            return capabilities;
+        }
+
+        [[nodiscard]] PluginSupportRules rulesFromTemplate(const BuildTemplate& resolvedTemplate)
+        {
+            PluginSupportRules rules;
+            rules.pluginExtensions = normalizedExtensions(resolvedTemplate.pluginExtensions);
+            rules.profileFiles = resolvedTemplate.profileFiles;
+            rules.basePlugins = resolvedTemplate.basePlugins;
+            pushUniquePath(rules.pluginSearchDirectories, {});
+            if (!resolvedTemplate.dataDirectory.empty())
+            {
+                pushUniquePath(rules.pluginSearchDirectories, std::filesystem::path(resolvedTemplate.dataDirectory));
+            }
+            rules.activePluginsFileName = profileFileNamed(resolvedTemplate.profileFiles, L"plugins.txt");
+            rules.loadOrderFileName = profileFileNamed(resolvedTemplate.profileFiles, L"loadorder.txt");
+            rules.basePluginSourceLabel = !resolvedTemplate.gameName.empty()
+                ? resolvedTemplate.gameName
+                : (!resolvedTemplate.displayName.empty() ? resolvedTemplate.displayName : std::wstring(L"Base game"));
+            rules.basePluginLockReason = L"Базовый мастер игры: всегда сверху";
+
+            for (const NormalizedExtension& extension : rules.pluginExtensions)
+            {
+                addExtensionKey(rules.pluginExtensionKeys, extension);
+            }
+            for (const NormalizedExtension& extension : rules.masterPluginExtensions)
+            {
+                addExtensionKey(rules.masterPluginExtensionKeys, extension);
+            }
+            for (const NormalizedExtension& extension : rules.lightPluginExtensions)
+            {
+                addExtensionKey(rules.lightPluginExtensionKeys, extension);
+            }
+            for (const std::wstring& basePlugin : rules.basePlugins)
+            {
+                const std::wstring key = toLower(basePlugin);
+                if (!key.empty())
+                {
+                    rules.basePluginKeys.insert(key);
+                }
+            }
+            for (const std::filesystem::path& directory : rules.pluginSearchDirectories)
+            {
+                addPathKey(rules.pluginSearchDirectoryKeys, directory);
+            }
+
+            return rules;
+        }
+
+        class CompatibilityPluginRulesProvider final : public IPluginRulesProvider
+        {
+        public:
+            explicit CompatibilityPluginRulesProvider(const BuildTemplate& resolvedTemplate)
+                : rules_(rulesFromTemplate(resolvedTemplate))
+            {
+            }
+
+            [[nodiscard]] const PluginSupportRules& pluginRules() const noexcept override
+            {
+                return rules_;
+            }
+
+        private:
+            PluginSupportRules rules_;
+        };
+
+        template <typename Callback>
+        auto withTemplatePluginRules(const BuildTemplate& resolvedTemplate, Callback&& callback)
+        {
+            const GameSupportLookupResult lookup =
+                GameSupportRegistry::embedded().lookupById(resolvedTemplate.id);
+            if (lookup.supported && lookup.support != nullptr)
+            {
+                const GameSupportComponents& components = lookup.support->components();
+                if (components.pluginRulesProvider != nullptr)
+                {
+                    const GameIdentityRules& identity = lookup.support->identity();
+                    return callback(PluginRuleContext{
+                        components.pluginRulesProvider,
+                        &lookup.support->capabilities(),
+                        nullptr,
+                        identity.defaultProfileName.empty()
+                            ? resolvedTemplate.defaultProfileName
+                            : identity.defaultProfileName,
+                        identity.id.value()
+                    });
+                }
+            }
+
+            const CompatibilityPluginRulesProvider rulesProvider(resolvedTemplate);
+            const CapabilitySet capabilities = capabilitiesFromTemplate(resolvedTemplate);
+            return callback(PluginRuleContext{
+                &rulesProvider,
+                &capabilities,
+                nullptr,
+                resolvedTemplate.defaultProfileName,
+                resolvedTemplate.id
+            });
+        }
+
+        GameTypeParseResult<NormalizedExtension> parsePathExtension(const std::filesystem::path& path)
+        {
+            return NormalizedExtension::parse(path.extension().wstring());
+        }
+
+        std::wstring extensionLabel(const NormalizedExtension& extension)
+        {
+            const std::wstring value = extension.value();
+            return value.size() > 1 ? toUpper(value.substr(1)) : std::wstring();
         }
 
         std::wstring extensionLabel(const std::filesystem::path& path)
         {
-            const std::wstring extension = path.extension().wstring();
-            return extension.size() > 1 ? toUpper(extension.substr(1)) : std::wstring();
+            const GameTypeParseResult<NormalizedExtension> extension = parsePathExtension(path);
+            if (!extension)
+            {
+                return {};
+            }
+
+            return extensionLabel(extension.value());
+        }
+
+        bool containsExtension(
+            const std::vector<NormalizedExtension>& extensions,
+            const NormalizedExtension& extension)
+        {
+            return std::any_of(
+                extensions.begin(),
+                extensions.end(),
+                [&extension](const NormalizedExtension& candidate)
+                {
+                    return extension == candidate;
+                });
+        }
+
+        bool containsExtension(
+            const std::vector<NormalizedExtension>& extensions,
+            const std::set<std::wstring>& extensionKeys,
+            const NormalizedExtension& extension)
+        {
+            if (extension.value().empty())
+            {
+                return false;
+            }
+            if (!extensionKeys.empty())
+            {
+                return extensionKeys.contains(extension.value());
+            }
+
+            return containsExtension(extensions, extension);
         }
 
         bool hasPluginExtension(
             const std::filesystem::path& path,
-            const std::vector<std::wstring>& pluginExtensions)
+            const PluginSupportRules& rules,
+            NormalizedExtension& extension)
         {
-            const std::wstring extension = normalizeExtension(path);
-            return std::any_of(
-                pluginExtensions.begin(),
-                pluginExtensions.end(),
-                [&extension](const std::wstring& candidate)
-                {
-                    return extension == toLower(candidate);
-                });
+            const GameTypeParseResult<NormalizedExtension> parsed = parsePathExtension(path);
+            if (!parsed)
+            {
+                return false;
+            }
+
+            extension = parsed.value();
+            return containsExtension(rules.pluginExtensions, rules.pluginExtensionKeys, extension);
         }
 
-        std::wstring profileNameOrDefault(const BuildTemplate& resolvedTemplate, std::wstring_view profileName)
+        std::wstring profileNameOrDefault(const PluginRuleContext& context, std::wstring_view profileName)
         {
             if (!profileName.empty())
             {
                 return std::wstring(profileName);
             }
 
-            return resolvedTemplate.defaultProfileName.empty()
+            return context.defaultProfileName.empty()
                 ? std::wstring(fallbackProfileName)
-                : resolvedTemplate.defaultProfileName;
+                : context.defaultProfileName;
         }
 
         std::filesystem::path profileDirectory(
             const BuildPathSettingsService& pathSettings,
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             std::wstring_view profileName)
         {
             return pathSettings.profilesDirectory(projectDirectory) /
-                std::filesystem::path(profileNameOrDefault(resolvedTemplate, profileName));
+                std::filesystem::path(profileNameOrDefault(context, profileName));
         }
 
         std::filesystem::path pluginsFilePath(
             const BuildPathSettingsService& pathSettings,
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             std::wstring_view profileName)
         {
-            return profileDirectory(pathSettings, projectDirectory, resolvedTemplate, profileName) /
-                std::filesystem::path(pluginsFileName);
+            const PluginSupportRules& rules = context.rulesProvider->pluginRules();
+            return profileDirectory(pathSettings, projectDirectory, context, profileName) /
+                std::filesystem::path(rules.activePluginsFileName);
         }
 
         std::string toUtf8(const std::wstring& value)
@@ -189,7 +429,7 @@ namespace fluxora
                 0);
             if (size <= 0)
             {
-                throw std::invalid_argument("plugins.txt is not valid UTF-8.");
+                throw std::invalid_argument("Plugin state file is not valid UTF-8.");
             }
 
             std::wstring out(static_cast<std::size_t>(size), L'\0');
@@ -219,48 +459,55 @@ namespace fluxora
                 std::istreambuf_iterator<char>());
         }
 
-        void writeTextFile(const std::filesystem::path& path, const std::string& content)
+        void recoverPluginStateFile(const std::filesystem::path& path)
         {
-            const std::filesystem::path parent = path.parent_path();
-            if (!parent.empty())
-            {
-                std::filesystem::create_directories(parent);
-            }
-
-            const std::filesystem::path temporaryPath = path.wstring() + std::wstring(transientFileExtension);
-            std::ofstream file(temporaryPath, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!file)
-            {
-                throw std::runtime_error("Failed to write plugins.txt.");
-            }
-
-            file.write(content.data(), static_cast<std::streamsize>(content.size()));
-            file.close();
-
-            std::error_code error;
-            std::filesystem::rename(temporaryPath, path, error);
-            if (!error)
-            {
-                return;
-            }
-
-            std::filesystem::remove(path, error);
-            std::filesystem::rename(temporaryPath, path);
+            static_cast<void>(AtomicFileStore().recoverFile(
+                path,
+                AtomicFileWriteOptions{
+                    L"plugin list state",
+                    ProjectStateValidation::Utf8Text
+                }));
         }
 
-        bool isBasePlugin(const BuildTemplate& resolvedTemplate, std::wstring_view pluginName)
+        void writePluginStateFile(const std::filesystem::path& path, const std::string& content)
         {
+            AtomicFileStore().writeTextFile(
+                path,
+                content,
+                AtomicFileWriteOptions{
+                    L"plugin list state",
+                    ProjectStateValidation::Utf8Text
+                });
+        }
+
+        bool isBasePlugin(const PluginSupportRules& rules, std::wstring_view pluginName)
+        {
+            if (!rules.basePluginKeys.empty())
+            {
+                return rules.basePluginKeys.contains(toLower(std::wstring(pluginName)));
+            }
+
             return std::any_of(
-                resolvedTemplate.basePlugins.begin(),
-                resolvedTemplate.basePlugins.end(),
+                rules.basePlugins.begin(),
+                rules.basePlugins.end(),
                 [pluginName](const std::wstring& basePlugin)
                 {
                     return equalsIgnoreCase(basePlugin, pluginName);
                 });
         }
 
+        bool isMasterPlugin(
+            const PluginSupportRules& rules,
+            std::wstring_view pluginName,
+            const NormalizedExtension& extension)
+        {
+            return isBasePlugin(rules, pluginName) ||
+                containsExtension(rules.masterPluginExtensions, rules.masterPluginExtensionKeys, extension);
+        }
+
         std::vector<StoredPlugin> readStoredPlugins(const std::filesystem::path& path)
         {
+            recoverPluginStateFile(path);
             std::vector<StoredPlugin> result;
             const std::string content = readTextFile(path);
             if (content.empty())
@@ -312,6 +559,200 @@ namespace fluxora
             return result;
         }
 
+        [[nodiscard]] std::map<std::wstring, PluginScanCacheEntry>& pluginScanCache()
+        {
+            static std::map<std::wstring, PluginScanCacheEntry> cache;
+            return cache;
+        }
+
+        [[nodiscard]] std::mutex& pluginScanCacheMutex()
+        {
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        [[nodiscard]] std::wstring pathFingerprint(const std::filesystem::path& path)
+        {
+            std::error_code error;
+            const bool exists = std::filesystem::exists(path, error) && !error;
+            if (!exists)
+            {
+                return L"missing";
+            }
+
+            error.clear();
+            const auto timestamp = std::filesystem::last_write_time(path, error);
+            const auto timestampCount = error ? 0 : timestamp.time_since_epoch().count();
+            error.clear();
+            const bool regular = std::filesystem::is_regular_file(path, error) && !error;
+            std::uintmax_t size = 0;
+            if (regular)
+            {
+                error.clear();
+                size = std::filesystem::file_size(path, error);
+                if (error)
+                {
+                    size = 0;
+                }
+            }
+
+            return L"mtime=" + std::to_wstring(timestampCount) +
+                L";size=" + std::to_wstring(size) +
+                L";kind=" + (regular ? std::wstring(L"file") : std::wstring(L"other"));
+        }
+
+        [[nodiscard]] std::wstring pluginRulesSignature(const PluginSupportRules& rules)
+        {
+            std::wstring signature;
+            for (const NormalizedExtension& extension : rules.pluginExtensions)
+            {
+                signature.append(L"ext=");
+                signature.append(extension.value());
+                signature.push_back(L';');
+            }
+            for (const std::filesystem::path& directory : rules.pluginSearchDirectories)
+            {
+                signature.append(L"dir=");
+                signature.append(normalizePathComparisonKey(directory, PathCaseSensitivity::CaseInsensitive));
+                signature.push_back(L';');
+            }
+
+            return signature;
+        }
+
+        [[nodiscard]] std::string pluginRulesSummary(const PluginSupportRules& rules)
+        {
+            return "extensions=" + toUtf8(pluginRulesSignature(rules)) +
+                ";activeFile=" + toUtf8(rules.activePluginsFileName) +
+                ";loadOrderFile=" + toUtf8(rules.loadOrderFileName) +
+                ";basePlugins=" + std::to_string(rules.basePlugins.size()) +
+                ";searchDirectories=" + std::to_string(rules.pluginSearchDirectories.size());
+        }
+
+        void logPluginRuleFailure(
+            Logger* logger,
+            std::string_view operation,
+            const PluginRuleContext& context,
+            std::string_view reason)
+        {
+            if (logger == nullptr)
+            {
+                return;
+            }
+
+            logger->writeOperation(
+                LogLevel::Error,
+                "PluginDiagnostics",
+                std::string(operation) +
+                    " unsupportedCapabilityError=\"" + std::string(reason) + "\"" +
+                    ", selectedGameId=\"" + toUtf8(context.gameId) + "\"" +
+                    ", capabilities=" +
+                    std::to_string(context.capabilities == nullptr ? 0 : context.capabilities->bits()) +
+                    ", healthResult=\"" +
+                    (context.health == nullptr
+                        ? std::string("<unknown>")
+                        : toUtf8(GameHealthCheckService::healthStatusName(context.health->status))) + "\".");
+        }
+
+        void logAppliedPluginRules(
+            Logger& logger,
+            std::string_view operation,
+            const PluginRuleContext& context,
+            std::wstring_view profileName)
+        {
+            if (context.rulesProvider == nullptr)
+            {
+                return;
+            }
+
+            const PluginSupportRules& rules = context.rulesProvider->pluginRules();
+            logger.writeOperation(
+                LogLevel::Info,
+                "PluginDiagnostics",
+                std::string(operation) +
+                    " selectedGameId=\"" + toUtf8(context.gameId) + "\"" +
+                    ", profile=\"" + toUtf8(profileNameOrDefault(context, profileName)) + "\"" +
+                    ", appliedPluginRules=\"" + pluginRulesSummary(rules) + "\".");
+        }
+
+        [[nodiscard]] std::wstring pluginScanCacheKey(
+            const std::filesystem::path& projectDirectory,
+            std::wstring_view profileName,
+            const PluginSupportRules& rules,
+            const std::filesystem::path& modsDirectory)
+        {
+            return normalizePathComparisonKey(projectDirectory, PathCaseSensitivity::CaseInsensitive) +
+                L"|profile=" + toLower(std::wstring(profileName)) +
+                L"|mods=" + normalizePathComparisonKey(modsDirectory, PathCaseSensitivity::CaseInsensitive) +
+                L"|rules=" + pluginRulesSignature(rules);
+        }
+
+        [[nodiscard]] std::wstring pluginScanFingerprint(
+            const std::filesystem::path& modsDirectory,
+            const PluginSupportRules& rules,
+            const std::vector<ProfileModFolder>& profileModFolders)
+        {
+            std::wstring fingerprint;
+            for (const ProfileModFolder& folder : profileModFolders)
+            {
+                fingerprint.append(L"mod=");
+                fingerprint.append(toLower(folder.folderName));
+                fingerprint.append(folder.isEnabled ? L":enabled;" : L":disabled;");
+
+                const std::filesystem::path modDirectory =
+                    modsDirectory / std::filesystem::path(folder.folderName);
+                for (const std::filesystem::path& relativeSearchDirectory : rules.pluginSearchDirectories)
+                {
+                    const std::filesystem::path searchDirectory =
+                        relativeSearchDirectory.empty() || relativeSearchDirectory == std::filesystem::path(L".")
+                            ? modDirectory
+                            : modDirectory / relativeSearchDirectory;
+                    fingerprint.append(L"search=");
+                    fingerprint.append(normalizePathComparisonKey(
+                        searchDirectory,
+                        PathCaseSensitivity::CaseInsensitive));
+                    fingerprint.push_back(L':');
+                    fingerprint.append(pathFingerprint(searchDirectory));
+                    fingerprint.push_back(L';');
+
+                    std::error_code error;
+                    if (!std::filesystem::exists(searchDirectory, error) ||
+                        !std::filesystem::is_directory(searchDirectory, error))
+                    {
+                        continue;
+                    }
+
+                    std::vector<std::wstring> entries;
+                    for (const auto& entry : std::filesystem::directory_iterator(
+                             searchDirectory,
+                             std::filesystem::directory_options::skip_permission_denied,
+                             error))
+                    {
+                        if (error)
+                        {
+                            break;
+                        }
+
+                        entries.push_back(
+                            normalizePathComparisonKey(
+                                entry.path().filename(),
+                                PathCaseSensitivity::CaseInsensitive) +
+                            L":" +
+                            pathFingerprint(entry.path()));
+                    }
+
+                    std::sort(entries.begin(), entries.end());
+                    for (const std::wstring& entry : entries)
+                    {
+                        fingerprint.append(entry);
+                        fingerprint.push_back(L';');
+                    }
+                }
+            }
+
+            return fingerprint;
+        }
+
         std::string serializeStoredPlugins(const std::vector<StoredPlugin>& plugins)
         {
             std::wstring text;
@@ -332,21 +773,16 @@ namespace fluxora
         std::map<std::wstring, DetectedPlugin> detectInstalledPlugins(
             const BuildPathSettingsService& pathSettings,
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             std::wstring_view profileName)
         {
+            const PluginSupportRules& rules = context.rulesProvider->pluginRules();
             std::map<std::wstring, DetectedPlugin> detected;
             const std::filesystem::path directory = pathSettings.modsDirectory(projectDirectory);
             if (!std::filesystem::exists(directory))
             {
                 return detected;
             }
-
-            struct ProfileModFolder
-            {
-                std::wstring folderName;
-                bool isEnabled{true};
-            };
 
             std::vector<ProfileModFolder> profileModFolders;
             for (const ProfileOrderItemRecord& item :
@@ -361,13 +797,25 @@ namespace fluxora
                 }
             }
 
-            const auto addPlugin = [&detected, &resolvedTemplate](
+            const std::wstring cacheKey = pluginScanCacheKey(projectDirectory, profileName, rules, directory);
+            const std::wstring fingerprint = pluginScanFingerprint(directory, rules, profileModFolders);
+            {
+                std::lock_guard<std::mutex> lock(pluginScanCacheMutex());
+                const auto cached = pluginScanCache().find(cacheKey);
+                if (cached != pluginScanCache().end() && cached->second.fingerprint == fingerprint)
+                {
+                    return cached->second.detected;
+                }
+            }
+
+            const auto addPlugin = [&detected, &rules](
                 const std::filesystem::directory_entry& entry,
                 const std::wstring& sourceMod,
                 bool sourceModEnabled)
             {
+                NormalizedExtension extension;
                 if (!entry.is_regular_file() ||
-                    !hasPluginExtension(entry.path(), resolvedTemplate.pluginExtensions))
+                    !hasPluginExtension(entry.path(), rules, extension))
                 {
                     return;
                 }
@@ -385,7 +833,7 @@ namespace fluxora
 
                 detected[key] = DetectedPlugin{
                     fileName,
-                    extensionLabel(entry.path()),
+                    extension,
                     sourceMod,
                     sourceModEnabled
                 };
@@ -399,41 +847,40 @@ namespace fluxora
                     continue;
                 }
 
-                std::error_code error;
-                for (const auto& entry : std::filesystem::directory_iterator(
-                         modDirectory,
-                         std::filesystem::directory_options::skip_permission_denied,
-                         error))
+                for (const std::filesystem::path& relativeSearchDirectory : rules.pluginSearchDirectories)
                 {
-                    if (error)
+                    const std::filesystem::path searchDirectory =
+                        relativeSearchDirectory.empty() || relativeSearchDirectory == std::filesystem::path(L".")
+                            ? modDirectory
+                            : modDirectory / relativeSearchDirectory;
+                    std::error_code searchError;
+                    if (!std::filesystem::exists(searchDirectory, searchError) ||
+                        !std::filesystem::is_directory(searchDirectory, searchError))
                     {
-                        break;
+                        continue;
                     }
 
-                    addPlugin(entry, folder.folderName, folder.isEnabled);
-                }
-
-                if (!resolvedTemplate.dataDirectory.empty())
-                {
-                    const std::filesystem::path dataDirectory =
-                        modDirectory / std::filesystem::path(resolvedTemplate.dataDirectory);
-                    std::error_code dataError;
-                    if (std::filesystem::exists(dataDirectory, dataError) &&
-                        std::filesystem::is_directory(dataDirectory, dataError))
+                    for (const auto& entry : std::filesystem::directory_iterator(
+                             searchDirectory,
+                             std::filesystem::directory_options::skip_permission_denied,
+                             searchError))
                     {
-                        for (const auto& entry : std::filesystem::directory_iterator(
-                                 dataDirectory,
-                                 std::filesystem::directory_options::skip_permission_denied,
-                                 dataError))
+                        if (searchError)
                         {
-                            if (dataError)
-                            {
-                                break;
-                            }
-
-                            addPlugin(entry, folder.folderName, folder.isEnabled);
+                            break;
                         }
+
+                        addPlugin(entry, folder.folderName, folder.isEnabled);
                     }
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(pluginScanCacheMutex());
+                pluginScanCache()[cacheKey] = PluginScanCacheEntry{fingerprint, detected};
+                while (pluginScanCache().size() > 64)
+                {
+                    pluginScanCache().erase(pluginScanCache().begin());
                 }
             }
 
@@ -443,16 +890,19 @@ namespace fluxora
         std::vector<StoredPlugin> reconcileStoredPlugins(
             const BuildPathSettingsService& pathSettings,
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             std::wstring_view profileName,
             const std::map<std::wstring, DetectedPlugin>& detected)
         {
+            const PluginSupportRules& rules = context.rulesProvider->pluginRules();
             const std::filesystem::path pluginsPath =
-                pluginsFilePath(pathSettings, projectDirectory, resolvedTemplate, profileName);
+                pluginsFilePath(pathSettings, projectDirectory, context, profileName);
             std::vector<StoredPlugin> stored = readStoredPlugins(pluginsPath);
             const std::vector<StoredPlugin> loadOrder =
-                readStoredPlugins(profileDirectory(pathSettings, projectDirectory, resolvedTemplate, profileName) /
-                    std::filesystem::path(loadOrderFileName));
+                rules.loadOrderFileName.empty()
+                    ? std::vector<StoredPlugin>()
+                    : readStoredPlugins(profileDirectory(pathSettings, projectDirectory, context, profileName) /
+                        std::filesystem::path(rules.loadOrderFileName));
 
             std::set<std::wstring> storedKeys;
             for (const StoredPlugin& plugin : stored)
@@ -472,7 +922,7 @@ namespace fluxora
             std::vector<StoredPlugin> reconciled;
             std::set<std::wstring> included;
 
-            for (const std::wstring& basePlugin : resolvedTemplate.basePlugins)
+            for (const std::wstring& basePlugin : rules.basePlugins)
             {
                 const std::wstring key = toLower(basePlugin);
                 if (included.insert(key).second)
@@ -484,7 +934,7 @@ namespace fluxora
             for (const StoredPlugin& plugin : stored)
             {
                 const std::wstring key = toLower(plugin.name);
-                if (included.contains(key) || isBasePlugin(resolvedTemplate, plugin.name))
+                if (included.contains(key) || isBasePlugin(rules, plugin.name))
                 {
                     continue;
                 }
@@ -513,7 +963,7 @@ namespace fluxora
 
             if (serializeStoredPlugins(stored) != serializeStoredPlugins(reconciled))
             {
-                writeTextFile(pluginsPath, serializeStoredPlugins(reconciled));
+                writePluginStateFile(pluginsPath, serializeStoredPlugins(reconciled));
             }
 
             return reconciled;
@@ -522,19 +972,19 @@ namespace fluxora
         void writeStoredPlugins(
             const BuildPathSettingsService& pathSettings,
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             std::wstring_view profileName,
             const std::vector<StoredPlugin>& plugins)
         {
-            writeTextFile(
-                pluginsFilePath(pathSettings, projectDirectory, resolvedTemplate, profileName),
+            writePluginStateFile(
+                pluginsFilePath(pathSettings, projectDirectory, context, profileName),
                 serializeStoredPlugins(plugins));
         }
 
         void writeStoredPluginsIfChanged(
             const BuildPathSettingsService& pathSettings,
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             std::wstring_view profileName,
             const std::vector<StoredPlugin>& currentPlugins,
             const std::vector<StoredPlugin>& desiredPlugins)
@@ -544,7 +994,7 @@ namespace fluxora
                 return;
             }
 
-            writeStoredPlugins(pathSettings, projectDirectory, resolvedTemplate, profileName, desiredPlugins);
+            writeStoredPlugins(pathSettings, projectDirectory, context, profileName, desiredPlugins);
         }
 
         std::vector<std::wstring> storedPluginNames(const std::vector<StoredPlugin>& plugins)
@@ -572,12 +1022,13 @@ namespace fluxora
 
         std::vector<PluginEntry> buildEntries(
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolvedTemplate,
+            const PluginRuleContext& context,
             const std::vector<StoredPlugin>& stored,
             const std::vector<ProfilePluginOrderItemRecord>& orderRecords,
             const std::map<std::wstring, DetectedPlugin>& detected)
         {
             (void)projectDirectory;
+            const PluginSupportRules& rules = context.rulesProvider->pluginRules();
             const std::map<std::wstring, StoredPlugin> storedByName = storedPluginsByName(stored);
 
             std::vector<PluginEntry> entries;
@@ -620,10 +1071,11 @@ namespace fluxora
                 const StoredPlugin& plugin = storedPlugin->second;
                 const std::wstring key = toLower(plugin.name);
                 const auto detectedPlugin = detected.find(key);
-                const bool locked = isBasePlugin(resolvedTemplate, plugin.name);
-                const std::wstring extension = detectedPlugin == detected.end()
-                    ? extensionLabel(std::filesystem::path(plugin.name))
+                const bool locked = isBasePlugin(rules, plugin.name);
+                const NormalizedExtension extension = detectedPlugin == detected.end()
+                    ? parsePathExtension(std::filesystem::path(plugin.name)).valueOrThrow()
                     : detectedPlugin->second.extension;
+                const std::wstring extensionText = extensionLabel(extension);
                 const bool enabled = locked || (
                     plugin.isEnabled &&
                     (detectedPlugin == detected.end() || detectedPlugin->second.sourceModEnabled));
@@ -633,14 +1085,18 @@ namespace fluxora
                     std::wstring(pluginKind),
                     static_cast<int>(entries.size()),
                     plugin.name,
-                    extension,
-                    locked ? std::wstring(L"Skyrim") :
+                    extensionText,
+                    locked ? (rules.basePluginSourceLabel.empty()
+                        ? std::wstring(L"Base game")
+                        : rules.basePluginSourceLabel) :
                         (detectedPlugin == detected.end() ? std::wstring() : detectedPlugin->second.sourceMod),
                     enabled,
-                    locked || equalsIgnoreCase(extension, L"ESM"),
-                    equalsIgnoreCase(extension, L"ESL"),
+                    isMasterPlugin(rules, plugin.name, extension),
+                    containsExtension(rules.lightPluginExtensions, rules.lightPluginExtensionKeys, extension),
                     locked,
-                    locked ? std::wstring(L"Базовый мастер Skyrim: всегда сверху") : std::wstring(),
+                    locked ? (rules.basePluginLockReason.empty()
+                        ? std::wstring(L"Plugin is locked by the selected game's load-order rules.")
+                        : rules.basePluginLockReason) : std::wstring(),
                     {}
                 });
             }
@@ -792,16 +1248,62 @@ namespace fluxora
             return nullptr;
         }
 
-        void ensurePluginSystemSupported(const BuildTemplate& resolvedTemplate)
+        void ensurePluginSystemSupported(
+            const PluginRuleContext& context,
+            bool requireLoadOrder,
+            Logger* logger,
+            std::string_view operation)
         {
-            if (!isSkyrimTemplate(resolvedTemplate))
+            const auto fail = [&](const char* reason)
             {
-                throw std::invalid_argument("Plugin management is currently available for Skyrim builds only.");
+                logPluginRuleFailure(logger, operation, context, reason);
+                throw std::invalid_argument(reason);
+            };
+
+            if (context.health != nullptr && !context.health->allowsAutomation())
+            {
+                fail("Plugin management is not available because game health is blocking automation.");
             }
 
-            if (resolvedTemplate.pluginExtensions.empty())
+            if (context.capabilities == nullptr)
             {
-                throw std::invalid_argument("The selected build template does not define plugin extensions.");
+                fail("Plugin management requires game capabilities.");
+            }
+
+            if (!context.capabilities->has(GameCapability::Plugins))
+            {
+                fail("Plugin management is not supported by the selected game.");
+            }
+
+            if (requireLoadOrder && !context.capabilities->has(GameCapability::LoadOrder))
+            {
+                fail("Plugin load-order management is not supported by the selected game.");
+            }
+
+            if (context.rulesProvider == nullptr)
+            {
+                fail("Plugin management requires plugin rules for the selected game.");
+            }
+
+            const PluginSupportRules& rules = context.rulesProvider->pluginRules();
+            if (rules.pluginExtensions.empty())
+            {
+                fail("The selected game does not define plugin extensions.");
+            }
+
+            if (rules.activePluginsFileName.empty())
+            {
+                fail("The selected game does not define an active plugin list file.");
+            }
+
+            if (requireLoadOrder && rules.loadOrderFileName.empty())
+            {
+                fail("The selected game does not define a load-order file.");
+            }
+
+            if (rules.pluginSearchDirectories.empty())
+            {
+                fail("The selected game does not define plugin search locations.");
             }
         }
     }
@@ -841,27 +1343,41 @@ namespace fluxora
         const BuildTemplate& resolvedTemplate,
         std::wstring_view profileName) const
     {
+        return withTemplatePluginRules(
+            resolvedTemplate,
+            [this, &projectDirectory, profileName](const PluginRuleContext& rules)
+            {
+                return listPlugins(projectDirectory, rules, profileName);
+            });
+    }
+
+    std::vector<PluginEntry> PluginService::listPlugins(
+        const std::filesystem::path& projectDirectory,
+        const PluginRuleContext& rules,
+        std::wstring_view profileName) const
+    {
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
         }
 
-        ensurePluginSystemSupported(resolvedTemplate);
+        ensurePluginSystemSupported(rules, false, &logger_, "listPlugins");
+        logAppliedPluginRules(logger_, "listPlugins", rules, profileName);
         std::filesystem::create_directories(
-            profileDirectory(pathSettings_, projectDirectory, resolvedTemplate, profileName));
+            profileDirectory(pathSettings_, projectDirectory, rules, profileName));
 
         const std::map<std::wstring, DetectedPlugin> detected =
-            detectInstalledPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName);
+            detectInstalledPlugins(pathSettings_, projectDirectory, rules, profileName);
         std::vector<StoredPlugin> stored =
-            reconcileStoredPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName, detected);
+            reconcileStoredPlugins(pathSettings_, projectDirectory, rules, profileName, detected);
         std::vector<ProfilePluginOrderItemRecord> orderRecords =
             syncPluginOrderItems(projectDirectory, profileName, stored);
         std::vector<PluginEntry> entries =
-            buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+            buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         writeStoredPluginsIfChanged(
             pathSettings_,
             projectDirectory,
-            resolvedTemplate,
+            rules,
             profileName,
             stored,
             storedPluginsFromEntries(entries));
@@ -875,23 +1391,39 @@ namespace fluxora
         std::wstring_view orderItemId,
         int targetIndex) const
     {
+        return withTemplatePluginRules(
+            resolvedTemplate,
+            [this, &projectDirectory, profileName, orderItemId, targetIndex](const PluginRuleContext& rules)
+            {
+                return movePlugin(projectDirectory, rules, profileName, orderItemId, targetIndex);
+            });
+    }
+
+    std::vector<PluginEntry> PluginService::movePlugin(
+        const std::filesystem::path& projectDirectory,
+        const PluginRuleContext& rules,
+        std::wstring_view profileName,
+        std::wstring_view orderItemId,
+        int targetIndex) const
+    {
         if (orderItemId.empty())
         {
             throw std::invalid_argument("Plugin order item id is required.");
         }
 
-        ensurePluginSystemSupported(resolvedTemplate);
+        ensurePluginSystemSupported(rules, true, &logger_, "movePlugin");
+        logAppliedPluginRules(logger_, "movePlugin", rules, profileName);
         std::filesystem::create_directories(
-            profileDirectory(pathSettings_, projectDirectory, resolvedTemplate, profileName));
+            profileDirectory(pathSettings_, projectDirectory, rules, profileName));
 
         const std::map<std::wstring, DetectedPlugin> detected =
-            detectInstalledPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName);
+            detectInstalledPlugins(pathSettings_, projectDirectory, rules, profileName);
         std::vector<StoredPlugin> stored =
-            reconcileStoredPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName, detected);
+            reconcileStoredPlugins(pathSettings_, projectDirectory, rules, profileName, detected);
         std::vector<ProfilePluginOrderItemRecord> orderRecords =
             syncPluginOrderItems(projectDirectory, profileName, stored);
         std::vector<PluginEntry> entries =
-            buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+            buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         const PluginEntry* movingEntry = findPluginOrderEntry(entries, orderItemId);
         if (movingEntry == nullptr)
         {
@@ -915,11 +1447,11 @@ namespace fluxora
             storedPluginNames(stored),
             movingEntry->orderId,
             clampedTarget);
-        entries = buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+        entries = buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         writeStoredPluginsIfChanged(
             pathSettings_,
             projectDirectory,
-            resolvedTemplate,
+            rules,
             profileName,
             stored,
             storedPluginsFromEntries(entries));
@@ -934,23 +1466,39 @@ namespace fluxora
         std::wstring_view title,
         int targetIndex) const
     {
+        return withTemplatePluginRules(
+            resolvedTemplate,
+            [this, &projectDirectory, profileName, title, targetIndex](const PluginRuleContext& rules)
+            {
+                return createPluginSeparator(projectDirectory, rules, profileName, title, targetIndex);
+            });
+    }
+
+    std::vector<PluginEntry> PluginService::createPluginSeparator(
+        const std::filesystem::path& projectDirectory,
+        const PluginRuleContext& rules,
+        std::wstring_view profileName,
+        std::wstring_view title,
+        int targetIndex) const
+    {
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
         }
 
-        ensurePluginSystemSupported(resolvedTemplate);
+        ensurePluginSystemSupported(rules, true, &logger_, "createPluginSeparator");
+        logAppliedPluginRules(logger_, "createPluginSeparator", rules, profileName);
         std::filesystem::create_directories(
-            profileDirectory(pathSettings_, projectDirectory, resolvedTemplate, profileName));
+            profileDirectory(pathSettings_, projectDirectory, rules, profileName));
 
         const std::map<std::wstring, DetectedPlugin> detected =
-            detectInstalledPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName);
+            detectInstalledPlugins(pathSettings_, projectDirectory, rules, profileName);
         std::vector<StoredPlugin> stored =
-            reconcileStoredPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName, detected);
+            reconcileStoredPlugins(pathSettings_, projectDirectory, rules, profileName, detected);
         std::vector<ProfilePluginOrderItemRecord> orderRecords =
             syncPluginOrderItems(projectDirectory, profileName, stored);
         std::vector<PluginEntry> entries =
-            buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+            buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         const int clampedTarget = clampPluginSeparatorInsertionTarget(entries, targetIndex);
 
         orderRecords = InstanceMetadataStore::createProfilePluginOrderSeparator(
@@ -959,11 +1507,11 @@ namespace fluxora
             storedPluginNames(stored),
             title,
             clampedTarget);
-        entries = buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+        entries = buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         writeStoredPluginsIfChanged(
             pathSettings_,
             projectDirectory,
-            resolvedTemplate,
+            rules,
             profileName,
             stored,
             storedPluginsFromEntries(entries));
@@ -976,19 +1524,34 @@ namespace fluxora
         std::wstring_view profileName,
         std::wstring_view separatorId) const
     {
+        return withTemplatePluginRules(
+            resolvedTemplate,
+            [this, &projectDirectory, profileName, separatorId](const PluginRuleContext& rules)
+            {
+                return deletePluginSeparator(projectDirectory, rules, profileName, separatorId);
+            });
+    }
+
+    std::vector<PluginEntry> PluginService::deletePluginSeparator(
+        const std::filesystem::path& projectDirectory,
+        const PluginRuleContext& rules,
+        std::wstring_view profileName,
+        std::wstring_view separatorId) const
+    {
         if (projectDirectory.empty())
         {
             throw std::invalid_argument("Project directory is required.");
         }
 
-        ensurePluginSystemSupported(resolvedTemplate);
+        ensurePluginSystemSupported(rules, true, &logger_, "deletePluginSeparator");
+        logAppliedPluginRules(logger_, "deletePluginSeparator", rules, profileName);
         std::filesystem::create_directories(
-            profileDirectory(pathSettings_, projectDirectory, resolvedTemplate, profileName));
+            profileDirectory(pathSettings_, projectDirectory, rules, profileName));
 
         const std::map<std::wstring, DetectedPlugin> detected =
-            detectInstalledPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName);
+            detectInstalledPlugins(pathSettings_, projectDirectory, rules, profileName);
         std::vector<StoredPlugin> stored =
-            reconcileStoredPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName, detected);
+            reconcileStoredPlugins(pathSettings_, projectDirectory, rules, profileName, detected);
         std::vector<ProfilePluginOrderItemRecord> orderRecords =
             InstanceMetadataStore::deleteProfilePluginOrderSeparator(
                 projectDirectory,
@@ -996,11 +1559,11 @@ namespace fluxora
                 storedPluginNames(stored),
                 separatorId);
         std::vector<PluginEntry> entries =
-            buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+            buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         writeStoredPluginsIfChanged(
             pathSettings_,
             projectDirectory,
-            resolvedTemplate,
+            rules,
             profileName,
             stored,
             storedPluginsFromEntries(entries));
@@ -1014,19 +1577,36 @@ namespace fluxora
         std::wstring_view pluginName,
         bool isEnabled) const
     {
+        return withTemplatePluginRules(
+            resolvedTemplate,
+            [this, &projectDirectory, profileName, pluginName, isEnabled](const PluginRuleContext& rules)
+            {
+                return setPluginEnabled(projectDirectory, rules, profileName, pluginName, isEnabled);
+            });
+    }
+
+    std::vector<PluginEntry> PluginService::setPluginEnabled(
+        const std::filesystem::path& projectDirectory,
+        const PluginRuleContext& rules,
+        std::wstring_view profileName,
+        std::wstring_view pluginName,
+        bool isEnabled) const
+    {
         if (pluginName.empty())
         {
             throw std::invalid_argument("Plugin name is required.");
         }
 
-        ensurePluginSystemSupported(resolvedTemplate);
+        ensurePluginSystemSupported(rules, false, &logger_, "setPluginEnabled");
+        logAppliedPluginRules(logger_, "setPluginEnabled", rules, profileName);
+        const PluginSupportRules& pluginRules = rules.rulesProvider->pluginRules();
         std::filesystem::create_directories(
-            profileDirectory(pathSettings_, projectDirectory, resolvedTemplate, profileName));
+            profileDirectory(pathSettings_, projectDirectory, rules, profileName));
 
         const std::map<std::wstring, DetectedPlugin> detected =
-            detectInstalledPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName);
+            detectInstalledPlugins(pathSettings_, projectDirectory, rules, profileName);
         std::vector<StoredPlugin> stored =
-            reconcileStoredPlugins(pathSettings_, projectDirectory, resolvedTemplate, profileName, detected);
+            reconcileStoredPlugins(pathSettings_, projectDirectory, rules, profileName, detected);
         const std::vector<StoredPlugin> previousStored = stored;
         const auto match = std::find_if(
             stored.begin(),
@@ -1040,9 +1620,9 @@ namespace fluxora
             throw std::invalid_argument("Plugin was not found.");
         }
 
-        if (isBasePlugin(resolvedTemplate, match->name) && !isEnabled)
+        if (isBasePlugin(pluginRules, match->name) && !isEnabled)
         {
-            throw std::invalid_argument("Base Skyrim masters cannot be disabled.");
+            throw std::invalid_argument("Base game masters cannot be disabled.");
         }
 
         const auto detectedPlugin = detected.find(toLower(match->name));
@@ -1051,16 +1631,16 @@ namespace fluxora
             throw std::invalid_argument("Enable the source mod before enabling this plugin.");
         }
 
-        match->isEnabled = isBasePlugin(resolvedTemplate, match->name) ? true : isEnabled;
+        match->isEnabled = isBasePlugin(pluginRules, match->name) ? true : isEnabled;
 
         std::vector<ProfilePluginOrderItemRecord> orderRecords =
             syncPluginOrderItems(projectDirectory, profileName, stored);
         std::vector<PluginEntry> entries =
-            buildEntries(projectDirectory, resolvedTemplate, stored, orderRecords, detected);
+            buildEntries(projectDirectory, rules, stored, orderRecords, detected);
         writeStoredPluginsIfChanged(
             pathSettings_,
             projectDirectory,
-            resolvedTemplate,
+            rules,
             profileName,
             previousStored,
             storedPluginsFromEntries(entries));

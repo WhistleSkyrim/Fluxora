@@ -1,10 +1,20 @@
 #include "FluxoraCore/Services/Logger.hpp"
 
+#include <spdlog/common.h>
+#include <spdlog/logger.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#ifdef _WIN32
+#include <spdlog/sinks/msvc_sink.h>
+#endif
+#include <spdlog/spdlog.h>
+
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <exception>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -12,6 +22,12 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -19,6 +35,14 @@ namespace fluxora
 {
     namespace
     {
+        thread_local std::string currentOperationId;
+        std::atomic_uint64_t loggerInstanceCounter{0};
+
+        std::filesystem::path processCrashLogPath;
+        std::mutex processCrashLogMutex;
+        std::terminate_handler previousTerminateHandler = nullptr;
+        std::once_flag terminateHandlerOnce;
+
         std::string_view toLabel(LogLevel level) noexcept
         {
             switch (level)
@@ -34,6 +58,40 @@ namespace fluxora
             }
 
             return "UNKNOWN";
+        }
+
+        std::string_view toChannelLabel(LogChannel channel) noexcept
+        {
+            switch (channel)
+            {
+            case LogChannel::Core:
+                return "Core";
+            case LogChannel::Bridge:
+                return "Bridge";
+            case LogChannel::Operations:
+                return "Operations";
+            case LogChannel::Crash:
+                return "Crash";
+            }
+
+            return "Core";
+        }
+
+        spdlog::level::level_enum toSpdLevel(LogLevel level) noexcept
+        {
+            switch (level)
+            {
+            case LogLevel::Debug:
+                return spdlog::level::debug;
+            case LogLevel::Info:
+                return spdlog::level::info;
+            case LogLevel::Warning:
+                return spdlog::level::warn;
+            case LogLevel::Error:
+                return spdlog::level::err;
+            }
+
+            return spdlog::level::info;
         }
 
         std::tm localTimeNow()
@@ -118,6 +176,11 @@ namespace fluxora
             return {};
         }
 
+        std::filesystem::path tempLogDirectory()
+        {
+            return std::filesystem::temp_directory_path() / L"Fluxora" / L"logs";
+        }
+
         bool isDebugLoggingEnabled()
         {
             const std::wstring value = readEnvironmentVariable(L"FLUXORA_DEBUG_LOGS");
@@ -128,9 +191,8 @@ namespace fluxora
                 value == L"YES";
         }
 
-        std::string pathForLog(const std::filesystem::path& path)
+        std::string toUtf8(std::wstring_view wide)
         {
-            const std::wstring wide = path.wstring();
             if (wide.empty())
             {
                 return {};
@@ -139,7 +201,7 @@ namespace fluxora
             const int requiredLength = WideCharToMultiByte(
                 CP_UTF8,
                 0,
-                wide.c_str(),
+                wide.data(),
                 static_cast<int>(wide.size()),
                 nullptr,
                 0,
@@ -147,20 +209,26 @@ namespace fluxora
                 nullptr);
             if (requiredLength <= 0)
             {
-                return path.string();
+                return {};
             }
 
             std::string value(static_cast<std::size_t>(requiredLength), '\0');
             WideCharToMultiByte(
                 CP_UTF8,
                 0,
-                wide.c_str(),
+                wide.data(),
                 static_cast<int>(wide.size()),
                 value.data(),
                 requiredLength,
                 nullptr,
                 nullptr);
             return value;
+        }
+
+        std::string pathForLog(const std::filesystem::path& path)
+        {
+            const std::string converted = toUtf8(path.wstring());
+            return converted.empty() ? path.string() : converted;
         }
 #else
         std::filesystem::path executableDirectory()
@@ -178,6 +246,11 @@ namespace fluxora
                 : std::filesystem::path(home) / ".local" / "state" / "fluxora" / "logs";
         }
 
+        std::filesystem::path tempLogDirectory()
+        {
+            return std::filesystem::temp_directory_path() / "Fluxora" / "logs";
+        }
+
         bool isDebugLoggingEnabled()
         {
             const char* value = std::getenv("FLUXORA_DEBUG_LOGS");
@@ -185,6 +258,11 @@ namespace fluxora
                 (std::string_view(value) == "1" ||
                  std::string_view(value) == "true" ||
                  std::string_view(value) == "yes");
+        }
+
+        std::string toUtf8(std::wstring_view wide)
+        {
+            return std::string(wide.begin(), wide.end());
         }
 
         std::string pathForLog(const std::filesystem::path& path)
@@ -200,7 +278,13 @@ namespace fluxora
             return error ? path : absolute;
         }
 
-        std::filesystem::path chooseLogPath()
+        bool canAppendFile(const std::filesystem::path& path)
+        {
+            std::ofstream file(path, std::ios::out | std::ios::app | std::ios::binary);
+            return static_cast<bool>(file);
+        }
+
+        std::filesystem::path chooseLogDirectory()
         {
             std::vector<std::filesystem::path> directories;
             if (const std::filesystem::path directory = executableDirectory(); !directory.empty())
@@ -213,8 +297,8 @@ namespace fluxora
                 directories.push_back(directory);
             }
 
-            const std::filesystem::path fileName =
-                std::wstring(L"fluxora-core-") + logDateStamp() + L".log";
+            directories.push_back(tempLogDirectory());
+
             for (const std::filesystem::path& directory : directories)
             {
                 std::error_code error;
@@ -224,90 +308,391 @@ namespace fluxora
                     continue;
                 }
 
-                const std::filesystem::path candidate = directory / fileName;
-                std::ofstream file(candidate, std::ios::out | std::ios::app | std::ios::binary);
-                if (file)
+                const std::filesystem::path probe = directory / L".fluxora-log-probe";
+                if (canAppendFile(probe))
                 {
-                    return makeAbsolute(candidate);
+                    std::filesystem::remove(probe, error);
+                    return makeAbsolute(directory);
                 }
             }
 
             return {};
         }
+
+        std::filesystem::path logPathFor(const std::filesystem::path& directory, std::wstring_view name)
+        {
+            return directory.empty()
+                ? std::filesystem::path{}
+                : directory / (std::wstring(name) + L"-" + logDateStamp() + L".log");
+        }
+
+        std::shared_ptr<spdlog::logger> createLogger(
+            std::string_view name,
+            const std::filesystem::path& path,
+            bool debugEnabled)
+        {
+            if (path.empty())
+            {
+                return {};
+            }
+
+            std::vector<spdlog::sink_ptr> sinks;
+            auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(pathForLog(path), true);
+            fileSink->set_level(spdlog::level::trace);
+            sinks.push_back(fileSink);
+
+#ifdef _WIN32
+            auto debugSink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
+            debugSink->set_level(debugEnabled ? spdlog::level::debug : spdlog::level::info);
+            sinks.push_back(debugSink);
+#endif
+
+            const std::uint64_t instance = ++loggerInstanceCounter;
+            auto logger = std::make_shared<spdlog::logger>(
+                std::string(name) + "-" + std::to_string(instance),
+                sinks.begin(),
+                sinks.end());
+            logger->set_pattern("%v");
+            logger->set_level(debugEnabled ? spdlog::level::debug : spdlog::level::info);
+            logger->flush_on(spdlog::level::warn);
+            spdlog::register_logger(logger);
+            return logger;
+        }
+
+        void dropLogger(const std::shared_ptr<spdlog::logger>& logger) noexcept
+        {
+            if (!logger)
+            {
+                return;
+            }
+
+            try
+            {
+                logger->flush();
+                spdlog::drop(logger->name());
+            }
+            catch (...)
+            {
+            }
+        }
+
+        std::string formatLine(
+            LogChannel channel,
+            LogLevel level,
+            std::string_view category,
+            std::string_view message)
+        {
+            const std::string safeCategory = category.empty()
+                ? std::string(toChannelLabel(channel))
+                : std::string(category);
+
+            std::ostringstream stream;
+            stream << "[" << timestamp() << "] "
+                   << "[" << toLabel(level) << "] "
+                   << "[" << toChannelLabel(channel) << "] "
+                   << "[" << safeCategory << "] "
+                   << "[tid=" << std::this_thread::get_id() << "]";
+
+            if (!currentOperationId.empty())
+            {
+                stream << " [op=" << currentOperationId << "]"
+                       << " [operationId=" << currentOperationId << "]";
+            }
+
+            stream << " " << message;
+            return stream.str();
+        }
+
+        void fallbackWrite(const std::string& line)
+        {
+#ifdef _WIN32
+            OutputDebugStringA((line + "\n").c_str());
+#endif
+            std::clog << line << '\n';
+        }
+
+        void writeRawCrashLine(std::string_view message) noexcept
+        {
+            try
+            {
+                std::ostringstream line;
+                line << "[" << timestamp() << "] "
+                     << "[ERROR] "
+                     << "[Crash] "
+                     << "[NativeCrash] "
+                     << "[tid=" << std::this_thread::get_id() << "]";
+                if (!currentOperationId.empty())
+                {
+                    line << " [op=" << currentOperationId << "]"
+                         << " [operationId=" << currentOperationId << "]";
+                }
+                line << " " << message;
+
+                std::lock_guard lock(processCrashLogMutex);
+                if (!processCrashLogPath.empty())
+                {
+                    std::filesystem::create_directories(processCrashLogPath.parent_path());
+                    std::ofstream file(processCrashLogPath, std::ios::out | std::ios::app | std::ios::binary);
+                    if (file)
+                    {
+                        file << line.str() << '\n';
+                        file.flush();
+                    }
+                }
+
+                fallbackWrite(line.str());
+            }
+            catch (...)
+            {
+            }
+        }
+
+        void terminateHandler() noexcept
+        {
+            writeRawCrashLine("std::terminate called.");
+            if (previousTerminateHandler != nullptr)
+            {
+                previousTerminateHandler();
+            }
+
+            std::abort();
+        }
+
+        void installTerminateHandler(const std::filesystem::path& crashLogPath)
+        {
+            {
+                std::lock_guard lock(processCrashLogMutex);
+                processCrashLogPath = crashLogPath;
+            }
+
+            std::call_once(terminateHandlerOnce, []()
+            {
+                previousTerminateHandler = std::set_terminate(terminateHandler);
+            });
+        }
+
+#ifdef _WIN32
+        LPTOP_LEVEL_EXCEPTION_FILTER previousUnhandledExceptionFilter = nullptr;
+        std::once_flag unhandledExceptionFilterOnce;
+
+        LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* exceptionPointers) noexcept
+        {
+            DWORD code = 0;
+            void* address = nullptr;
+            if (exceptionPointers != nullptr && exceptionPointers->ExceptionRecord != nullptr)
+            {
+                code = exceptionPointers->ExceptionRecord->ExceptionCode;
+                address = exceptionPointers->ExceptionRecord->ExceptionAddress;
+            }
+
+            std::ostringstream message;
+            message << "Unhandled native exception. code=0x"
+                    << std::hex << std::uppercase << code
+                    << ", address=" << address;
+            writeRawCrashLine(message.str());
+
+            if (previousUnhandledExceptionFilter != nullptr)
+            {
+                return previousUnhandledExceptionFilter(exceptionPointers);
+            }
+
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        void installUnhandledExceptionFilter(const std::filesystem::path& crashLogPath)
+        {
+            {
+                std::lock_guard lock(processCrashLogMutex);
+                processCrashLogPath = crashLogPath;
+            }
+
+            std::call_once(unhandledExceptionFilterOnce, []()
+            {
+                previousUnhandledExceptionFilter = SetUnhandledExceptionFilter(unhandledExceptionFilter);
+            });
+        }
+#endif
     }
 
     void Logger::initialize()
     {
+        std::lock_guard lock(mutex_);
         if (initialized_)
         {
             return;
         }
 
         debugEnabled_ = isDebugLoggingEnabled();
-        logPath_ = chooseLogPath();
+        const std::filesystem::path directory = chooseLogDirectory();
+        coreLogPath_ = logPathFor(directory, L"fluxora-core");
+        bridgeLogPath_ = logPathFor(directory, L"fluxora-bridge");
+        operationsLogPath_ = logPathFor(directory, L"fluxora-operations");
+        crashLogPath_ = logPathFor(directory, L"fluxora-crash");
+
+        try
+        {
+            coreLogger_ = createLogger("fluxora-core", coreLogPath_, debugEnabled_);
+            bridgeLogger_ = createLogger("fluxora-bridge", bridgeLogPath_, debugEnabled_);
+            operationsLogger_ = createLogger("fluxora-operations", operationsLogPath_, debugEnabled_);
+            crashLogger_ = createLogger("fluxora-crash", crashLogPath_, true);
+            installTerminateHandler(crashLogPath_);
+#ifdef _WIN32
+            installUnhandledExceptionFilter(crashLogPath_);
+#endif
+        }
+        catch (const std::exception& exception)
+        {
+            fallbackWrite(std::string("Failed to initialize native spdlog loggers: ") + exception.what());
+            coreLogger_.reset();
+            bridgeLogger_.reset();
+            operationsLogger_.reset();
+            crashLogger_.reset();
+        }
+
         initialized_ = true;
 
         std::ostringstream stream;
         stream << "Native logger initialized";
-        if (!logPath_.empty())
+        if (!coreLogPath_.empty())
         {
-            stream << ". path=" << pathForLog(logPath_);
+            stream << ". corePath=" << pathForLog(coreLogPath_);
+        }
+        if (!bridgeLogPath_.empty())
+        {
+            stream << ", bridgePath=" << pathForLog(bridgeLogPath_);
+        }
+        if (!operationsLogPath_.empty())
+        {
+            stream << ", operationsPath=" << pathForLog(operationsLogPath_);
+        }
+        if (!crashLogPath_.empty())
+        {
+            stream << ", crashPath=" << pathForLog(crashLogPath_);
         }
         stream << ". debug=" << (debugEnabled_ ? "enabled" : "disabled");
-        write(LogLevel::Info, "Logging", stream.str());
+
+        const std::string line = formatLine(LogChannel::Core, LogLevel::Info, "Logging", stream.str());
+        if (coreLogger_)
+        {
+            coreLogger_->info("{}", line);
+            coreLogger_->flush();
+        }
+        else
+        {
+            fallbackWrite(line);
+        }
     }
 
     void Logger::shutdown()
     {
+        std::lock_guard lock(mutex_);
         if (!initialized_)
         {
             return;
         }
 
-        write(LogLevel::Info, "Logging", "Native logger shut down.");
+        const std::string line = formatLine(LogChannel::Core, LogLevel::Info, "Logging", "Native logger shut down.");
+        if (coreLogger_)
+        {
+            coreLogger_->info("{}", line);
+            coreLogger_->flush();
+        }
+        else
+        {
+            fallbackWrite(line);
+        }
+
         initialized_ = false;
+        dropLogger(coreLogger_);
+        dropLogger(bridgeLogger_);
+        dropLogger(operationsLogger_);
+        dropLogger(crashLogger_);
+        coreLogger_.reset();
+        bridgeLogger_.reset();
+        operationsLogger_.reset();
+        crashLogger_.reset();
+        spdlog::shutdown();
     }
 
     void Logger::write(LogLevel level, std::string_view message) const
     {
-        write(level, "Core", message);
+        write(LogChannel::Core, level, "Core", message);
     }
 
     void Logger::write(LogLevel level, std::string_view category, std::string_view message) const
+    {
+        write(LogChannel::Core, level, category, message);
+    }
+
+    void Logger::write(
+        LogChannel channel,
+        LogLevel level,
+        std::string_view category,
+        std::string_view message) const
     {
         if (level == LogLevel::Debug && !debugEnabled_)
         {
             return;
         }
 
-        const std::string safeCategory = category.empty()
-            ? std::string("Core")
-            : std::string(category);
+        const std::string line = formatLine(channel, level, category, message);
 
-        std::ostringstream stream;
-        stream << "[" << timestamp() << "] "
-               << "[" << toLabel(level) << "] "
-               << "[" << safeCategory << "] "
-               << "[tid=" << std::this_thread::get_id() << "] "
-               << message;
-        const std::string line = stream.str();
-
-        std::lock_guard lock(mutex_);
-
-        if (!logPath_.empty())
+        std::shared_ptr<spdlog::logger> logger;
         {
-            std::ofstream file(logPath_, std::ios::out | std::ios::app | std::ios::binary);
-            if (file)
+            std::lock_guard lock(mutex_);
+            switch (channel)
             {
-                file << line << '\n';
+            case LogChannel::Core:
+                logger = coreLogger_;
+                break;
+            case LogChannel::Bridge:
+                logger = bridgeLogger_;
+                break;
+            case LogChannel::Operations:
+                logger = operationsLogger_;
+                break;
+            case LogChannel::Crash:
+                logger = crashLogger_;
+                break;
             }
         }
 
-#ifdef _WIN32
-        OutputDebugStringA((line + "\n").c_str());
-#endif
+        if (logger)
+        {
+            logger->log(toSpdLevel(level), "{}", line);
+            if (level == LogLevel::Warning || level == LogLevel::Error || channel == LogChannel::Crash)
+            {
+                logger->flush();
+            }
+            return;
+        }
 
-        std::clog << line << '\n';
+        fallbackWrite(line);
+    }
+
+    void Logger::writeOperation(LogLevel level, std::string_view category, std::string_view message) const
+    {
+        write(LogChannel::Operations, level, category, message);
+    }
+
+    void Logger::writeCrash(LogLevel level, std::string_view category, std::string_view message) const
+    {
+        write(LogChannel::Crash, level, category, message);
+    }
+
+    void Logger::setOperationId(std::wstring_view operationId)
+    {
+        currentOperationId = toUtf8(operationId);
+    }
+
+    void Logger::clearOperationId()
+    {
+        currentOperationId.clear();
+    }
+
+    std::string Logger::operationId()
+    {
+        return currentOperationId;
     }
 
     bool Logger::isInitialized() const noexcept
@@ -317,11 +702,26 @@ namespace fluxora
 
     const std::filesystem::path& Logger::logPath() const noexcept
     {
-        return logPath_;
+        return coreLogPath_;
+    }
+
+    const std::filesystem::path& Logger::bridgeLogPath() const noexcept
+    {
+        return bridgeLogPath_;
+    }
+
+    const std::filesystem::path& Logger::operationsLogPath() const noexcept
+    {
+        return operationsLogPath_;
+    }
+
+    const std::filesystem::path& Logger::crashLogPath() const noexcept
+    {
+        return crashLogPath_;
     }
 
     std::filesystem::path Logger::logDirectory() const
     {
-        return logPath_.empty() ? std::filesystem::path{} : logPath_.parent_path();
+        return coreLogPath_.empty() ? std::filesystem::path{} : coreLogPath_.parent_path();
     }
 }

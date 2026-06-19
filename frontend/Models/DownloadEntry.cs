@@ -1,6 +1,9 @@
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+
 namespace Fluxora.App.Models;
 
-public sealed class DownloadEntry
+public sealed class DownloadEntry : INotifyPropertyChanged
 {
     public required string Id { get; init; }
     public required string Name { get; init; }
@@ -26,4 +29,24 @@ public sealed class DownloadEntry
     public bool IsProgressIndeterminate => IsDownloading && !HasKnownProgress;
     public bool CanInstall { get; init; }
     public bool CanDelete { get; init; } = true;
+
+    private bool isSelected;
+    public bool IsSelected
+    {
+        get => isSelected;
+        set => SetField(ref isSelected, value);
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void SetField(ref bool field, bool value, [CallerMemberName] string? propertyName = null)
+    {
+        if (field == value)
+        {
+            return;
+        }
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
 }

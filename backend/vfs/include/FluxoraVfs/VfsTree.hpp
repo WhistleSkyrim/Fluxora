@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -74,6 +75,7 @@ namespace fluxora::vfs
         [[nodiscard]] static std::wstring toLower(std::wstring value);
         [[nodiscard]] static std::wstring normalizeRel(std::wstring rel);
         [[nodiscard]] static bool equalsIgnoreCase(const std::wstring& a, const std::wstring& b);
+        [[nodiscard]] static bool wildcardMatch(std::wstring_view name, std::wstring_view pattern);
 
     private:
         struct DirNode

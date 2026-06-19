@@ -313,6 +313,7 @@ namespace fluxora
             auth.expiresAtUtc = readStringOrDefault(*nexusMods, L"expiresAtUtc");
             auth.protectedAccessToken = readStringOrDefault(*nexusMods, L"protectedAccessToken");
             auth.protectedRefreshToken = readStringOrDefault(*nexusMods, L"protectedRefreshToken");
+            auth.protectedApiKey = readStringOrDefault(*nexusMods, L"protectedApiKey");
             auth.linked = auth.linked && !auth.protectedAccessToken.empty();
             return auth;
         }
@@ -334,6 +335,7 @@ namespace fluxora
         writer.field(L"expiresAtUtc", auth.expiresAtUtc);
         writer.field(L"protectedAccessToken", auth.protectedAccessToken);
         writer.field(L"protectedRefreshToken", auth.protectedRefreshToken);
+        writer.field(L"protectedApiKey", auth.protectedApiKey);
         writer.endObject();
         writer.endObject();
 

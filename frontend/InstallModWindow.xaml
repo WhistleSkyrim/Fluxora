@@ -12,8 +12,11 @@
         WindowStyle="None"
         Background="#171523"
         FontFamily="{StaticResource FluxoraFontBody}"
+        FontWeight="Medium"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
+        TextOptions.TextHintingMode="Fixed"
+        RenderOptions.ClearTypeHint="Enabled"
         FontSize="13"
         SnapsToDevicePixels="True"
         UseLayoutRounding="True"
@@ -96,7 +99,7 @@
             <Setter Property="MinWidth" Value="108" />
             <Setter Property="Padding" Value="15,0" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
@@ -108,44 +111,14 @@
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="10"
-                                RenderTransformOrigin="0.5,0.5">
-                            <Border.RenderTransform>
-                                <ScaleTransform ScaleX="1" ScaleY="1" />
-                            </Border.RenderTransform>
+                                CornerRadius="10">
                             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                              Margin="{TemplateBinding Padding}" />
+                                              Margin="{TemplateBinding Padding}"
+                                              TextElement.FontWeight="{TemplateBinding FontWeight}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
                         </Border>
                         <ControlTemplate.Triggers>
-                            <EventTrigger RoutedEvent="MouseEnter">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                         To="1.018"
-                                                         Duration="0:0:0.14" />
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                         To="1.018"
-                                                         Duration="0:0:0.14" />
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
-                            <EventTrigger RoutedEvent="MouseLeave">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                         To="1"
-                                                         Duration="0:0:0.16" />
-                                        <DoubleAnimation Storyboard.TargetName="Root"
-                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                         To="1"
-                                                         Duration="0:0:0.16" />
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="Root" Property="Opacity" Value="0.82" />
                             </Trigger>
@@ -236,17 +209,80 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style x:Key="ConflictActionButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="MinHeight" Value="84" />
+            <Setter Property="Padding" Value="14,12" />
+            <Setter Property="Background" Value="{StaticResource PanelRaisedBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="12">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentLineBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.82" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid Background="Transparent">
-        <Border Margin="0"
+        <Border x:Name="DialogSurface"
+                Margin="0"
                 Background="{StaticResource PanelBrush}"
                 BorderBrush="{StaticResource LineBrush}"
                 BorderThickness="1"
                 CornerRadius="16"
-                Padding="22,20,22,20">
+                Padding="22,20,22,20"
+                Opacity="0"
+                RenderTransformOrigin="0.5,0.5">
+            <Border.RenderTransform>
+                <TranslateTransform Y="10" />
+            </Border.RenderTransform>
+            <Border.Triggers>
+                <EventTrigger RoutedEvent="Loaded">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="DialogSurface"
+                                             Storyboard.TargetProperty="Opacity"
+                                             To="1"
+                                             Duration="0:0:0.18" />
+                            <DoubleAnimation Storyboard.TargetName="DialogSurface"
+                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                             To="0"
+                                             Duration="0:0:0.22" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </Border.Triggers>
             <Grid>
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -297,21 +333,139 @@
                            LineHeight="18"
                            TextWrapping="Wrap" />
 
-                <TextBox x:Name="ModNameTextBox"
+                <Border x:Name="PlacementPreviewPanel"
                          Grid.Row="2"
+                        Background="{StaticResource PanelSoftBrush}"
+                        BorderBrush="{StaticResource LineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        Padding="12"
+                        Margin="0,0,0,14"
+                        Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock Text="План размещения"
+                                   FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextBrush}" />
+                        <TextBlock x:Name="PlacementPreviewSummaryTextBlock"
+                                   Margin="0,5,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   LineHeight="17"
+                                   TextWrapping="Wrap" />
+                        <ScrollViewer MaxHeight="118"
+                                      Margin="0,8,0,0"
+                                      VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl x:Name="PlacementPreviewItemsControl">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}"
+                                                   Foreground="{StaticResource TextSecondaryBrush}"
+                                                   LineHeight="17"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,0,0,5" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </StackPanel>
+                </Border>
+
+                <TextBox x:Name="ModNameTextBox"
+                         Grid.Row="3"
                          Style="{StaticResource DialogTextBoxStyle}"
                          TextChanged="OnModNameTextChanged"
                          AutomationProperties.Name="Название мода" />
 
+                <StackPanel x:Name="ConflictPanel"
+                            Grid.Row="3"
+                            Grid.RowSpan="2"
+                            Visibility="Collapsed">
+                    <Button x:Name="ReplaceActionButton"
+                            Style="{StaticResource ConflictActionButtonStyle}"
+                            Click="OnReplaceClick"
+                            AutomationProperties.Name="Заменить мод">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="34"
+                                    Height="34"
+                                    CornerRadius="10"
+                                    Background="{StaticResource AccentSoftBrush}"
+                                    BorderBrush="{StaticResource AccentLineBrush}"
+                                    BorderThickness="1"
+                                    Margin="0,0,12,0">
+                                <TextBlock FontFamily="Segoe MDL2 Assets"
+                                           Text="&#xE8AC;"
+                                           FontSize="15"
+                                           Foreground="{StaticResource AccentHoverBrush}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Заменить"
+                                           FontSize="14"
+                                           FontWeight="Black"
+                                           Foreground="{StaticResource TextBrush}" />
+                                <TextBlock x:Name="ReplaceDescriptionTextBlock"
+                                           Text="Полностью удалить старый мод и поставить новый."
+                                           Margin="0,5,0,0"
+                                           LineHeight="17"
+                                           TextWrapping="Wrap"
+                                           Foreground="{StaticResource MutedTextBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Button>
+
+                    <Button Style="{StaticResource ConflictActionButtonStyle}"
+                            Click="OnMergeClick"
+                            Margin="0,10,0,0"
+                            AutomationProperties.Name="Объединить мод">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="34"
+                                    Height="34"
+                                    CornerRadius="10"
+                                    Background="#1D2A35"
+                                    BorderBrush="#356B68"
+                                    BorderThickness="1"
+                                    Margin="0,0,12,0">
+                                <TextBlock FontFamily="Segoe MDL2 Assets"
+                                           Text="&#xE8B3;"
+                                           FontSize="15"
+                                           Foreground="#68E1D1"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Объединить"
+                                           FontSize="14"
+                                           FontWeight="Black"
+                                           Foreground="{StaticResource TextBrush}" />
+                                <TextBlock x:Name="MergeDescriptionTextBlock"
+                                           Text="Добавить новые файлы, а совпадающие файлы перезаписать."
+                                           Margin="0,5,0,0"
+                                           LineHeight="17"
+                                           TextWrapping="Wrap"
+                                           Foreground="{StaticResource MutedTextBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Button>
+                </StackPanel>
+
                 <TextBlock x:Name="ValidationMessageTextBlock"
-                           Grid.Row="3"
+                           Grid.Row="4"
                            Margin="2,7,0,0"
                            Foreground="{StaticResource ErrorBrush}"
                            FontSize="12"
                            TextWrapping="Wrap"
                            Visibility="Collapsed" />
 
-                <StackPanel Grid.Row="4"
+                <StackPanel Grid.Row="5"
                             Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Margin="0,18,0,0">

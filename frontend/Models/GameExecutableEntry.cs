@@ -13,6 +13,7 @@ public sealed class GameExecutableEntry : INotifyPropertyChanged
     private string arguments = string.Empty;
     private string workingDirectory = string.Empty;
     private string iconPath = string.Empty;
+    private ExecutableDisplayMetadata executableDisplayMetadata = new();
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -84,6 +85,13 @@ public sealed class GameExecutableEntry : INotifyPropertyChanged
         set => SetField(ref iconPath, value);
     }
 
+    [JsonPropertyName("executableDisplayMetadata")]
+    public ExecutableDisplayMetadata ExecutableDisplayMetadata
+    {
+        get => executableDisplayMetadata;
+        set => SetField(ref executableDisplayMetadata, value ?? new ExecutableDisplayMetadata());
+    }
+
     [JsonIgnore]
     public string DisplayTitle
     {
@@ -118,7 +126,18 @@ public sealed class GameExecutableEntry : INotifyPropertyChanged
             ExecutablePath = ExecutablePath,
             Arguments = Arguments,
             WorkingDirectory = WorkingDirectory,
-            IconPath = IconPath
+            IconPath = IconPath,
+            ExecutableDisplayMetadata = new ExecutableDisplayMetadata
+            {
+                Id = ExecutableDisplayMetadata.Id,
+                DisplayName = ExecutableDisplayMetadata.DisplayName,
+                ExecutableName = ExecutableDisplayMetadata.ExecutableName,
+                Role = ExecutableDisplayMetadata.Role,
+                WorkingDirectoryKind = ExecutableDisplayMetadata.WorkingDirectoryKind,
+                IsPrimary = ExecutableDisplayMetadata.IsPrimary,
+                IsLauncher = ExecutableDisplayMetadata.IsLauncher,
+                IsScriptExtender = ExecutableDisplayMetadata.IsScriptExtender
+            }
         };
     }
 

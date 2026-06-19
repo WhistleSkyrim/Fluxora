@@ -1,5 +1,11 @@
 #include "FluxoraInstaller/FluxoraInstallerApi.hpp"
 
+#include <spdlog/logger.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#ifdef _WIN32
+#include <spdlog/sinks/msvc_sink.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -11,11 +17,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -37,7 +45,9 @@ namespace
     constexpr std::size_t CopyBufferSize = 1024 * 256;
 
     thread_local std::wstring lastError;
+    thread_local std::string currentOperationId;
     std::mutex logMutex;
+    std::shared_ptr<spdlog::logger> installerLogger;
 
     struct PackageHeader
     {
@@ -190,16 +200,50 @@ namespace
             line << "[" << std::put_time(&local, "%Y-%m-%d %H:%M:%S")
                  << "." << std::setfill('0') << std::setw(3) << milliseconds.count() << "] "
                  << "[" << level << "] "
-                 << "[Installer] "
-                 << message;
-
-            const std::filesystem::path logPath = resolveLogPath();
-            std::lock_guard lock(logMutex);
-            std::filesystem::create_directories(logPath.parent_path());
-            std::ofstream file(logPath, std::ios::out | std::ios::app | std::ios::binary);
-            if (file)
+                 << "[InstallerCore] "
+                 << "[tid=" << std::this_thread::get_id() << "]";
+            if (!currentOperationId.empty())
             {
-                file << line.str() << '\n';
+                line << " [op=" << currentOperationId << "]";
+            }
+            line << " " << message;
+
+            std::lock_guard lock(logMutex);
+            if (!installerLogger)
+            {
+                const std::filesystem::path logPath = resolveLogPath();
+                std::filesystem::create_directories(logPath.parent_path());
+                std::vector<spdlog::sink_ptr> sinks;
+                auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(toUtf8(logPath.wstring()), true);
+                fileSink->set_level(spdlog::level::trace);
+                sinks.push_back(fileSink);
+#ifdef _WIN32
+                auto debugSink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
+                debugSink->set_level(spdlog::level::info);
+                sinks.push_back(debugSink);
+#endif
+                installerLogger = std::make_shared<spdlog::logger>(
+                    "fluxora-installer-core",
+                    sinks.begin(),
+                    sinks.end());
+                installerLogger->set_pattern("%v");
+                installerLogger->set_level(spdlog::level::info);
+                installerLogger->flush_on(spdlog::level::warn);
+            }
+
+            if (level == "ERROR")
+            {
+                installerLogger->error("{}", line.str());
+                installerLogger->flush();
+            }
+            else if (level == "WARNING")
+            {
+                installerLogger->warn("{}", line.str());
+                installerLogger->flush();
+            }
+            else
+            {
+                installerLogger->info("{}", line.str());
             }
 #ifdef _WIN32
             OutputDebugStringA((line.str() + "\n").c_str());
@@ -657,6 +701,17 @@ namespace
 
         const PackageHeader header = readHeader(package);
         std::filesystem::create_directories(validatedInstallDirectory);
+        {
+            std::ostringstream stream;
+            stream << "Installer package validated. package=\""
+                   << toUtf8(packagePath.wstring())
+                   << "\", installDirectory=\""
+                   << toUtf8(validatedInstallDirectory.wstring())
+                   << "\", entries=" << header.entryCount
+                   << ", totalBytes=" << header.totalBytes
+                   << ", createDesktopShortcut=" << (shouldCreateDesktopShortcut ? "true" : "false");
+            writeLog("INFO", stream.str());
+        }
         emitProgress(callback, userData, L"preparing", L"", 0, header.totalBytes);
 
         std::uint64_t copiedBytes = 0;
@@ -710,6 +765,10 @@ namespace
         {
             result.desktopShortcutPath = createDesktopShortcut(applicationPath);
             result.createdDesktopShortcut = true;
+            writeLog(
+                "INFO",
+                std::string("Desktop shortcut created. path=\"") +
+                    toUtf8(result.desktopShortcutPath.wstring()) + "\"");
         }
 
         emitProgress(callback, userData, L"completed", L"", header.totalBytes, header.totalBytes);
@@ -729,6 +788,20 @@ extern "C"
     int fluxora_installer_is_available()
     {
         return 1;
+    }
+
+    int fluxora_installer_set_operation_context(const wchar_t* operationId)
+    {
+        if (isBlank(operationId))
+        {
+            currentOperationId.clear();
+        }
+        else
+        {
+            currentOperationId = toUtf8(operationId);
+        }
+
+        return FluxoraInstallerResultOk;
     }
 
     int fluxora_installer_validate_install_directory(

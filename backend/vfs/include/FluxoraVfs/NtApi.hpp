@@ -36,9 +36,18 @@ namespace fluxora::vfs::nt
     inline constexpr int FileFullDirectoryInformation = 2;
     inline constexpr int FileBothDirectoryInformation = 3;
     inline constexpr int FileNamesInformation = 12;
+    inline constexpr int FileRenameInformation = 10;
+    inline constexpr int FileDispositionInformation = 13;
     inline constexpr int FileIdBothDirectoryInformation = 37;
     inline constexpr int FileIdFullDirectoryInformation = 38;
     inline constexpr int FileIdExtdDirectoryInformation = 60;
+    inline constexpr int FileDispositionInformationEx = 64;
+    inline constexpr int FileRenameInformationEx = 65;
+    inline constexpr int FileIdExtdBothDirectoryInformation = 63;
+    inline constexpr int FileId64ExtdDirectoryInformation = 78;
+    inline constexpr int FileId64ExtdBothDirectoryInformation = 79;
+    inline constexpr int FileIdAllExtdDirectoryInformation = 80;
+    inline constexpr int FileIdAllExtdBothDirectoryInformation = 81;
 
     // --- directory-information layouts --------------------------------------
     // Every directory-information record begins with NextEntryOffset + FileIndex,
@@ -129,12 +138,156 @@ namespace fluxora::vfs::nt
         WCHAR FileName[1];
     };
 
+    struct FileIdExtdDirectoryInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG FileIndex;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER EndOfFile;
+        LARGE_INTEGER AllocationSize;
+        ULONG FileAttributes;
+        ULONG FileNameLength;
+        ULONG EaSize;
+        ULONG ReparsePointTag;
+        BYTE FileId[16];
+        WCHAR FileName[1];
+    };
+
+    struct FileIdExtdBothDirectoryInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG FileIndex;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER EndOfFile;
+        LARGE_INTEGER AllocationSize;
+        ULONG FileAttributes;
+        ULONG FileNameLength;
+        ULONG EaSize;
+        ULONG ReparsePointTag;
+        BYTE FileId[16];
+        CCHAR ShortNameLength;
+        WCHAR ShortName[12];
+        WCHAR FileName[1];
+    };
+
+    struct FileId64ExtdDirectoryInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG FileIndex;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER EndOfFile;
+        LARGE_INTEGER AllocationSize;
+        ULONG FileAttributes;
+        ULONG FileNameLength;
+        ULONG EaSize;
+        ULONG ReparsePointTag;
+        LARGE_INTEGER FileId;
+        WCHAR FileName[1];
+    };
+
+    struct FileId64ExtdBothDirectoryInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG FileIndex;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER EndOfFile;
+        LARGE_INTEGER AllocationSize;
+        ULONG FileAttributes;
+        ULONG FileNameLength;
+        ULONG EaSize;
+        ULONG ReparsePointTag;
+        LARGE_INTEGER FileId;
+        CCHAR ShortNameLength;
+        CCHAR Reserved1;
+        WCHAR ShortName[12];
+        WCHAR FileName[1];
+    };
+
+    struct FileIdAllExtdDirectoryInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG FileIndex;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER EndOfFile;
+        LARGE_INTEGER AllocationSize;
+        ULONG FileAttributes;
+        ULONG FileNameLength;
+        ULONG EaSize;
+        ULONG ReparsePointTag;
+        LARGE_INTEGER FileId;
+        BYTE FileId128[16];
+        WCHAR FileName[1];
+    };
+
+    struct FileIdAllExtdBothDirectoryInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG FileIndex;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER EndOfFile;
+        LARGE_INTEGER AllocationSize;
+        ULONG FileAttributes;
+        ULONG FileNameLength;
+        ULONG EaSize;
+        ULONG ReparsePointTag;
+        LARGE_INTEGER FileId;
+        BYTE FileId128[16];
+        CCHAR ShortNameLength;
+        CCHAR Reserved1;
+        WCHAR ShortName[12];
+        WCHAR FileName[1];
+    };
+
     struct FileNamesInformationRecord
     {
         ULONG NextEntryOffset;
         ULONG FileIndex;
         ULONG FileNameLength;
         WCHAR FileName[1];
+    };
+
+    struct FileRenameInformationData
+    {
+        BOOLEAN ReplaceIfExists;
+        HANDLE RootDirectory;
+        ULONG FileNameLength;
+        WCHAR FileName[1];
+    };
+
+    struct FileRenameInformationExData
+    {
+        ULONG Flags;
+        HANDLE RootDirectory;
+        ULONG FileNameLength;
+        WCHAR FileName[1];
+    };
+
+    struct FileDispositionInformationData
+    {
+        BOOLEAN DeleteFile;
+    };
+
+    struct FileDispositionInformationExData
+    {
+        ULONG Flags;
     };
 
     struct FileBasicInformationData
@@ -213,6 +366,16 @@ namespace fluxora::vfs::nt
         ULONG FileInformationClass,
         ULONG QueryFlags,
         PUNICODE_STRING FileName);
+
+    using NtSetInformationFileFn = NTSTATUS(NTAPI*)(
+        HANDLE FileHandle,
+        PIO_STATUS_BLOCK IoStatusBlock,
+        PVOID FileInformation,
+        ULONG Length,
+        ULONG FileInformationClass);
+
+    using NtDeleteFileFn = NTSTATUS(NTAPI*)(
+        POBJECT_ATTRIBUTES ObjectAttributes);
 
     using NtCloseFn = NTSTATUS(NTAPI*)(HANDLE Handle);
 }

@@ -10,4 +10,11 @@ public sealed class GameExecutableLaunchResult
     public string IconPath { get; init; } = string.Empty;
     public string ResolvedExecutablePath { get; init; } = string.Empty;
     public string ResolvedWorkingDirectory { get; init; } = string.Empty;
+    public string LaunchTrackingKind { get; init; } = "directProcess";
+    public List<string> ExpectedChildProcessNames { get; init; } = new();
+    public string HandoffDisplayName { get; init; } = string.Empty;
+    public int HandoffTimeoutMs { get; init; }
+    public LaunchTrackingMetadata LaunchTrackingMetadata { get; init; } = new();
+    public ExecutableDisplayMetadata ExecutableDisplayMetadata { get; init; } = new();
+    public int ProcessId { get; init; }
 }

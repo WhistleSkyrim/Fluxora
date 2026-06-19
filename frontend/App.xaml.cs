@@ -66,7 +66,7 @@ public partial class App : System.Windows.Application
                 "Подготавливаем главное окно",
                 84));
 
-            mainWindow = new MainWindow(coreBridgeService, settingsService, languageCatalogService);
+            mainWindow = new MainWindow(coreBridgeService, settingsService, languageCatalogService, applicationLogService);
             MainWindow = mainWindow;
 
             splashViewModel.Report(new StartupProgress(
@@ -84,7 +84,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception exception)
         {
-            applicationLogService.Error("Startup", "Application startup failed.", exception);
+            applicationLogService.CrashError("Startup", "Application startup failed.", exception);
             startupSplash.Close();
             System.Windows.MessageBox.Show(
                 exception.Message,
@@ -125,23 +125,23 @@ public partial class App : System.Windows.Application
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        applicationLogService?.Error("WPF", "Unhandled dispatcher exception.", e.Exception);
+        applicationLogService?.CrashError("WPF", "Unhandled dispatcher exception.", e.Exception);
     }
 
     private void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
         if (e.ExceptionObject is Exception exception)
         {
-            applicationLogService?.Error("AppDomain", "Unhandled application domain exception.", exception);
+            applicationLogService?.CrashError("AppDomain", "Unhandled application domain exception.", exception);
             return;
         }
 
-        applicationLogService?.Error("AppDomain", $"Unhandled application domain exception object: {e.ExceptionObject}");
+        applicationLogService?.CrashError("AppDomain", $"Unhandled application domain exception object: {e.ExceptionObject}");
     }
 
     private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
     {
-        applicationLogService?.Error("Tasks", "Unobserved task exception.", e.Exception);
+        applicationLogService?.CrashError("Tasks", "Unobserved task exception.", e.Exception);
     }
 
     private static async Task HoldStartupSplashAsync(DateTimeOffset shownAt)

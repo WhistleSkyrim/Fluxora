@@ -18,6 +18,7 @@ internal sealed class DragVisualAdorner : Adorner
     private static readonly WpfBrush BorderBrush = new SolidColorBrush(WpfColor.FromRgb(139, 92, 246));
     private static readonly WpfBrush TextBrush = new SolidColorBrush(WpfColor.FromRgb(247, 244, 255));
     private static readonly WpfBrush MutedTextBrush = new SolidColorBrush(WpfColor.FromRgb(197, 190, 218));
+    private static readonly WpfFontFamily FallbackFontFamily = new(new Uri("pack://application:,,,/"), "./Fonts/#Onest");
 
     private readonly string caption;
     private readonly string title;
@@ -32,6 +33,11 @@ internal sealed class DragVisualAdorner : Adorner
 
     public DragVisualAdorner(UIElement adornedElement, PluginEntry item)
         : this(adornedElement, item.IsSeparator ? "Разделитель" : "Плагин", item.DisplayName)
+    {
+    }
+
+    public DragVisualAdorner(UIElement adornedElement, DownloadEntry item)
+        : this(adornedElement, "Загрузка", item.Name)
     {
     }
 
@@ -93,7 +99,7 @@ internal sealed class DragVisualAdorner : Adorner
             System.Windows.FlowDirection.LeftToRight,
             new Typeface(
                 WpfApplication.Current.TryFindResource("FluxoraFontBody") as WpfFontFamily
-                    ?? new WpfFontFamily("Segoe UI Variable, Segoe UI"),
+                    ?? FallbackFontFamily,
                 FontStyles.Normal, weight, FontStretches.Normal),
             size,
             brush,

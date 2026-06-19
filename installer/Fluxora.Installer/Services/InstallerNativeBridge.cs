@@ -8,37 +8,72 @@ namespace Fluxora.Installer.Services;
 public sealed class InstallerNativeBridge
 {
     private const int NativeBufferLength = 32768;
+    private readonly InstallerLogService? logService;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
     };
 
+    public InstallerNativeBridge(InstallerLogService? logService = null)
+    {
+        this.logService = logService;
+    }
+
     public bool IsAvailable()
     {
         try
         {
-            return NativeMethods.IsAvailable() == 1;
+            bool available = NativeMethods.IsAvailable() == 1;
+            logService?.BridgeInfo($"Native installer availability checked. available={available}");
+            return available;
         }
         catch (Exception exception) when (IsNativeLoadException(exception))
         {
+            logService?.BridgeWarning("Native installer could not be loaded.", exception);
             return false;
         }
     }
 
     public string ValidateInstallDirectory(string installDirectory)
     {
-        StringBuilder message = new(NativeBufferLength);
-        int result = NativeMethods.ValidateInstallDirectory(
-            installDirectory,
-            message,
-            message.Capacity);
-        if (result == NativeResult.Ok)
-        {
-            return message.ToString();
-        }
+        return RunNative(
+            "ValidateInstallDirectory",
+            () =>
+            {
+                StringBuilder message = new(NativeBufferLength);
+                int result = NativeMethods.ValidateInstallDirectory(
+                    installDirectory,
+                    message,
+                    message.Capacity);
+                if (result == NativeResult.Ok)
+                {
+                    return message.ToString();
+                }
 
-        throw new InvalidOperationException(ReadLastError(result));
+                throw new InvalidOperationException(ReadLastError(result));
+            });
+    }
+
+    private T RunNative<T>(string operationName, Func<T> action)
+    {
+        ApplyNativeOperationContext();
+        logService?.BridgeInfo($"{operationName} native call started.");
+        try
+        {
+            T result = action();
+            logService?.BridgeInfo($"{operationName} native call completed.");
+            return result;
+        }
+        catch (Exception exception)
+        {
+            logService?.BridgeError($"{operationName} native call failed.", exception);
+            throw;
+        }
+        finally
+        {
+            ClearNativeOperationContext();
+        }
     }
 
     public Task<InstallerResult> InstallPackageAsync(
@@ -76,30 +111,58 @@ public sealed class InstallerNativeBridge
                         }
                         catch
                         {
+                            logService?.BridgeWarning($"Invalid installer progress payload ignored. payloadLength={json.Length}");
                         }
                     };
                 }
 
-                StringBuilder jsonBuffer = new(NativeBufferLength);
-                int result = NativeMethods.InstallPackage(
-                    packagePath,
-                    installDirectory,
-                    createDesktopShortcut ? 1 : 0,
-                    callback,
-                    IntPtr.Zero,
-                    jsonBuffer,
-                    jsonBuffer.Capacity);
-                GC.KeepAlive(callback);
+                return RunNative(
+                    "InstallPackage",
+                    () =>
+                    {
+                        StringBuilder jsonBuffer = new(NativeBufferLength);
+                        int result = NativeMethods.InstallPackage(
+                            packagePath,
+                            installDirectory,
+                            createDesktopShortcut ? 1 : 0,
+                            callback,
+                            IntPtr.Zero,
+                            jsonBuffer,
+                            jsonBuffer.Capacity);
+                        GC.KeepAlive(callback);
 
-                if (result != NativeResult.Ok)
-                {
-                    throw new InvalidOperationException(ReadLastError(result));
-                }
+                        if (result != NativeResult.Ok)
+                        {
+                            throw new InvalidOperationException(ReadLastError(result));
+                        }
 
-                return JsonSerializer.Deserialize<InstallerResult>(jsonBuffer.ToString(), JsonOptions)
-                    ?? throw new InvalidOperationException("Native installer returned an empty result.");
+                        return JsonSerializer.Deserialize<InstallerResult>(jsonBuffer.ToString(), JsonOptions)
+                            ?? throw new InvalidOperationException("Native installer returned an empty result.");
+                    });
             },
             cancellationToken);
+    }
+
+    private void ApplyNativeOperationContext()
+    {
+        try
+        {
+            NativeMethods.SetOperationContext(InstallerLogService.CurrentOperationId);
+        }
+        catch (Exception exception) when (IsNativeLoadException(exception) || exception is EntryPointNotFoundException)
+        {
+        }
+    }
+
+    private void ClearNativeOperationContext()
+    {
+        try
+        {
+            NativeMethods.SetOperationContext(string.Empty);
+        }
+        catch (Exception exception) when (IsNativeLoadException(exception) || exception is EntryPointNotFoundException)
+        {
+        }
     }
 
     private static string ReadLastError(int result)
@@ -128,6 +191,9 @@ public sealed class InstallerNativeBridge
     {
         [DllImport("FluxoraInstallerCore", EntryPoint = "fluxora_installer_is_available", CallingConvention = CallingConvention.Cdecl)]
         public static extern int IsAvailable();
+
+        [DllImport("FluxoraInstallerCore", EntryPoint = "fluxora_installer_set_operation_context", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        public static extern int SetOperationContext(string operationId);
 
         [DllImport("FluxoraInstallerCore", EntryPoint = "fluxora_installer_validate_install_directory", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         public static extern int ValidateInstallDirectory(

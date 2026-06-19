@@ -76,6 +76,56 @@ namespace fluxora::vfs
         return a.size() == b.size() && toLower(a) == toLower(b);
     }
 
+    bool VfsTree::wildcardMatch(std::wstring_view name, std::wstring_view pattern)
+    {
+        // NtQueryDirectoryFile uses DOS wildcard tokens for Win32 masks:
+        // DOS_STAR ('<'), DOS_QM ('>'), and DOS_DOT ('"'). Treat DOS_STAR like
+        // '*' here so common masks such as "*.dll" / "*.ess" match after Win32
+        // translates them to "<.dll" / "<.ess" at the native API layer.
+        std::size_t n = 0;
+        std::size_t p = 0;
+        std::size_t star = std::wstring_view::npos;
+        std::size_t mark = 0;
+
+        while (n < name.size())
+        {
+            if (p < pattern.size() &&
+                (pattern[p] == name[n] || pattern[p] == L'?' || pattern[p] == L'>'))
+            {
+                ++n;
+                ++p;
+            }
+            else if (p < pattern.size() && pattern[p] == L'"')
+            {
+                if (name[n] == L'.')
+                {
+                    ++n;
+                }
+                ++p;
+            }
+            else if (p < pattern.size() && (pattern[p] == L'*' || pattern[p] == L'<'))
+            {
+                star = p++;
+                mark = n;
+            }
+            else if (star != std::wstring_view::npos)
+            {
+                p = star + 1;
+                n = ++mark;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        while (p < pattern.size() && (pattern[p] == L'*' || pattern[p] == L'<' || pattern[p] == L'"'))
+        {
+            ++p;
+        }
+        return p == pattern.size();
+    }
+
     std::wstring VfsTree::normalizeRel(std::wstring rel)
     {
         std::replace(rel.begin(), rel.end(), L'/', L'\\');

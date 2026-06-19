@@ -66,4 +66,33 @@ public sealed class ConfirmDialogOptions
             IsDestructive = true
         };
     }
+
+    public static ConfirmDialogOptions IncludeGeneratedFluxPackAssets(ModProject project)
+    {
+        List<ConfirmDialogDetail> details = new()
+        {
+            new ConfirmDialogDetail
+            {
+                Icon = ConfirmDialogDetail.IconFromResource("Icon.FileText"),
+                Label = "FluxPack",
+                Value = "Source archives stay as links; generated assets are optional."
+            },
+            new ConfirmDialogDetail
+            {
+                Icon = ConfirmDialogDetail.IconFromResource("Icon.Folder"),
+                Label = "Сборка",
+                Value = project.ProjectDirectory
+            }
+        };
+
+        return new ConfirmDialogOptions
+        {
+            Heading = "Включить generated assets?",
+            Message = $"Для «{project.Name}» можно добавить манифест generated assets: LODGen, Synthesis, Nemesis, BodySlide, Pandora и похожие результаты. Это не добавит исходные архивы модов, но отметит эти файлы как разрешённые пользователем.",
+            Highlight = $"«{project.Name}»",
+            Details = details,
+            ConfirmText = "Включить",
+            CancelText = "Только рецепт"
+        };
+    }
 }

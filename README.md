@@ -46,11 +46,14 @@ The WPF project lives in `frontend`.
 
 ## Уникальные функции
 
-- Перенос готовой сборки из Mod Organizer 2 в Fluxora, чтобы продолжить работу с ней в нашей программе.
+- **Скорость как главный приоритет.** Fluxora делает ставку на быстрый запуск игры, быстрый отклик интерфейса и минимум ожидания при работе с модами. Нативное C++ ядро берет на себя тяжелые операции, поэтому менеджер остается легким и отзывчивым там, где классические лаунчеры и мод-менеджеры часто тормозят.
+- **Полноценный офлайн-режим.** Уже установленные игры, профили и моды остаются доступными без интернета: можно спокойно запускать игру и играть с выбранной сборкой даже без подключения к сети.
+- **Обмен мод-паками в один клик.** Пользователь может подготовить и поделиться своей сборкой без ручной упаковки, сложных инструкций и долгих настроек.
+- **Перенос готовой сборки из Mod Organizer 2.** Fluxora помогает импортировать существующую сборку из MO2, чтобы продолжить работу с ней в нашей программе.
 
 ## Build
 
-The recommended build entry point creates both distributable folders:
+The recommended build entry point creates the local application payload and the installer:
 
 ```powershell
 ./Build.ps1 -Configuration Release -Runtime win-x64
@@ -58,8 +61,12 @@ The recommended build entry point creates both distributable folders:
 
 The script creates:
 
-- `output/` - portable Fluxora build. By default the C#/.NET runtime is published as a single `FluxoraModding.exe`, with `FluxoraCore.dll` and `FluxoraVfs.dll` kept beside it for the native bridge and virtual file system hook. Use `-LooseFiles` if you need the old expanded .NET publish layout for debugging.
-- `output-installer/` - `FluxoraSetup.exe`, a branded installer that embeds the portable build, asks for language, privacy policy and terms acceptance, lets the user choose the installation folder, and unpacks Fluxora through the native C++ installer core.
+- `output/` - local application payload staging. It is used only to assemble the installer payload and must not be published as a release artifact.
+- `output-installer/` - `FluxoraSetup.exe`, the branded installer that embeds the application payload, asks for language, privacy policy and terms acceptance, lets the user choose the installation folder, and installs Fluxora through the native C++ installer core.
+
+## Release Policy
+
+Fluxora releases are installer-only. Publish only `output-installer/FluxoraSetup.exe`; do not commit, push, upload, attach, zip, or otherwise distribute `output/` or any portable build.
 
 ### Backend
 

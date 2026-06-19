@@ -14,6 +14,11 @@ public sealed class ResolvedTemplate
     public string DisplayName { get; set; } = string.Empty;
     public string GameName { get; set; } = string.Empty;
     public string Summary { get; set; } = string.Empty;
+    public string UiTemplateId { get; set; } = string.Empty;
+
+    // Deprecated bridge compatibility fields retained for one full frontend
+    // migration pass. New UI code should prefer typed capability/definition
+    // fields exposed below.
     public string BaseTemplateId { get; set; } = string.Empty;
     public string DefaultProfile { get; set; } = string.Empty;
     public string DataDirectory { get; set; } = string.Empty;
@@ -23,8 +28,14 @@ public sealed class ResolvedTemplate
     public List<string> ProfileFiles { get; set; } = new();
     public List<string> BasePlugins { get; set; } = new();
     public List<string> PluginExtensions { get; set; } = new();
+    public List<string> ArchiveExtensions { get; set; } = new();
+    public List<string> RequiredFiles { get; set; } = new();
     public List<string> Executables { get; set; } = new();
     public List<TemplateCapability> Capabilities { get; set; } = new();
+    public GameCapabilities GameCapabilities { get; set; } = new();
+    public ContentLayoutSummary ContentLayoutSummary { get; set; } = new();
+    public List<ExecutableDisplayMetadata> ExecutableDisplayMetadata { get; set; } = new();
+    public LaunchTrackingMetadata LaunchTrackingMetadata { get; set; } = new();
     public ScriptExtenderInfo? ScriptExtender { get; set; }
 
     public bool HasBasePlugins => BasePlugins.Count > 0;
@@ -60,7 +71,7 @@ public sealed class TemplateCapability
     };
 }
 
-/// <summary>Optional script-extender metadata (SKSE, F4SE, ...).</summary>
+/// <summary>Optional game-specific script-extender metadata.</summary>
 public sealed class ScriptExtenderInfo
 {
     public string Name { get; set; } = string.Empty;

@@ -182,7 +182,7 @@ function Write-FluxoraPayloadPackage {
     )
 
     if (-not (Test-Path -LiteralPath $SourceDirectory)) {
-        throw "Portable output directory '$SourceDirectory' does not exist."
+        throw "Application payload staging directory '$SourceDirectory' does not exist."
     }
 
     $sourceFullPath = [System.IO.Path]::GetFullPath($SourceDirectory)
@@ -417,5 +417,5 @@ Invoke-BuildStep "Publishing Fluxora installer ($Configuration)" {
 
 Write-Host ""
 Write-Host "Done. Project outputs are ready:"
-Write-Host "  Portable:  $OutputDir"
+Write-Host "  App payload staging: $OutputDir"
 Write-Host "  Installer: $InstallerOutputDir"

@@ -1,8 +1,15 @@
 #include "FluxoraCore/Services/ProjectService.hpp"
 
+#include "FluxoraCore/GameSupport/GameDetectionService.hpp"
+#include "FluxoraCore/GameSupport/GameHealthCheckService.hpp"
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
+#include "FluxoraCore/GameSupport/ProjectFingerprint.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
+#include "FluxoraCore/Services/PathSafetyService.hpp"
 #include "FluxoraCore/Services/TemplateService.hpp"
+#include "FluxoraCore/Storage/AtomicFileStore.hpp"
 #include "FluxoraCore/Storage/InstanceMetadataStore.hpp"
+#include "FluxoraCore/Storage/ProjectStateTransaction.hpp"
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
@@ -20,6 +27,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -307,21 +315,44 @@ namespace fluxora
                 std::istreambuf_iterator<char>());
         }
 
-        void writeTextFile(const std::filesystem::path& path, const std::string& content)
+        void writeStateFile(
+            const std::filesystem::path& path,
+            const std::string& content,
+            std::wstring stateName,
+            ProjectStateValidation validation = ProjectStateValidation::Utf8Text)
         {
-            const std::filesystem::path parent = path.parent_path();
-            if (!parent.empty())
+            AtomicFileStore().writeTextFile(
+                path,
+                content,
+                AtomicFileWriteOptions{
+                    std::move(stateName),
+                    validation
+                });
+        }
+
+        void recoverStateFile(
+            const std::filesystem::path& path,
+            std::wstring stateName,
+            ProjectStateValidation validation,
+            Logger& logger)
+        {
+            if (path.empty())
             {
-                std::filesystem::create_directories(parent);
+                return;
             }
 
-            std::ofstream file(path, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!file)
-            {
-                throw std::runtime_error("Failed to create project file.");
-            }
+            static_cast<void>(AtomicFileStore().recoverFile(
+                path,
+                AtomicFileWriteOptions{
+                    std::move(stateName),
+                    validation
+                },
+                &logger));
+        }
 
-            file.write(content.data(), static_cast<std::streamsize>(content.size()));
+        bool hasExtensionIgnoreCase(const std::filesystem::path& path, std::wstring_view extension)
+        {
+            return equalsIgnoreCase(path.extension().wstring(), extension);
         }
 
         JsonValue parseJsonConfig(const std::string& content)
@@ -502,6 +533,59 @@ namespace fluxora
                 readRequiredString(*value, L"loaderExecutable"),
                 readStringOrDefault(*value, L"website")
             };
+        }
+
+        std::optional<ProjectFingerprint> readProjectFingerprintField(const JsonValue& object)
+        {
+            const JsonValue* value = object.find(L"projectFingerprint");
+            if (value == nullptr || value->isNull())
+            {
+                return std::nullopt;
+            }
+
+            if (!value->isObject())
+            {
+                throw std::invalid_argument("Build config project fingerprint must be an object or null.");
+            }
+
+            ProjectFingerprint fingerprint;
+            fingerprint.gameId = readStringOrDefault(*value, L"gameId");
+            fingerprint.gameDisplayName = readStringOrDefault(*value, L"gameDisplayName");
+            fingerprint.gameDefinitionVersion = readStringOrDefault(*value, L"gameDefinitionVersion");
+            fingerprint.definitionBundleVersion = readStringOrDefault(*value, L"definitionBundleVersion");
+            fingerprint.supportModuleVersion = readStringOrDefault(*value, L"supportModuleVersion");
+            fingerprint.selectedInstallPath =
+                std::filesystem::path(readStringOrDefault(*value, L"selectedInstallPath"));
+            fingerprint.canonicalInstallPath =
+                std::filesystem::path(readStringOrDefault(*value, L"canonicalInstallPath"));
+            fingerprint.selectedExecutable =
+                std::filesystem::path(readStringOrDefault(*value, L"selectedExecutable"));
+            fingerprint.detectedStoreSource = readStringOrDefault(*value, L"detectedStoreSource");
+            fingerprint.detectionSource = readStringOrDefault(*value, L"detectionSource");
+            fingerprint.detectionConfidence = readStringOrDefault(*value, L"detectionConfidence");
+            fingerprint.healthStatusAtCreation = readStringOrDefault(*value, L"healthStatusAtCreation");
+            fingerprint.gameVersion = readStringOrDefault(*value, L"gameVersion");
+            fingerprint.timestamp = readStringOrDefault(*value, L"timestamp");
+            return fingerprint;
+        }
+
+        std::optional<ProjectFingerprint> readProjectFingerprintCompatibilityFields(
+            const JsonValue& manifest)
+        {
+            const std::wstring gameId = readStringOrDefault(manifest, L"gameId");
+            const std::wstring gameDisplayName = readStringOrDefault(manifest, L"gameDisplayName");
+            if (gameId.empty() && gameDisplayName.empty())
+            {
+                return std::nullopt;
+            }
+
+            ProjectFingerprint fingerprint;
+            fingerprint.gameId = gameId;
+            fingerprint.gameDisplayName = gameDisplayName;
+            fingerprint.selectedInstallPath =
+                std::filesystem::path(readStringOrDefault(manifest, L"gamePath"));
+            fingerprint.healthStatusAtCreation = L"unknown";
+            return fingerprint;
         }
 
         std::filesystem::path resolveManifestPath(
@@ -1187,9 +1271,15 @@ namespace fluxora
             }
         }
 
-        BuildTemplate buildTemplateFromManifest(const JsonValue& manifest, const TemplateService& templates)
+        BuildTemplate buildTemplateFromManifest(
+            const JsonValue& manifest,
+            const TemplateService& templates,
+            std::wstring templateId)
         {
-            const std::wstring templateId = readRequiredString(manifest, L"templateId");
+            if (templateId.empty())
+            {
+                throw std::invalid_argument("Build config does not declare a supported game id.");
+            }
 
             BuildTemplate resolved{};
             try
@@ -1249,21 +1339,8 @@ namespace fluxora
             const BuildTemplate& resolved,
             const std::filesystem::path& gameDirectory)
         {
-            std::vector<std::wstring> candidateNames;
-            if (equalsIgnoreCase(resolved.id, L"skyrimse"))
-            {
-                candidateNames.push_back(L"SkyrimSE.exe");
-                candidateNames.push_back(L"Skyrim SE.exe");
-                candidateNames.push_back(L"SkyrimSELauncher.exe");
-            }
-
-            candidateNames.push_back(L"SkyrimSE.exe");
-            candidateNames.push_back(L"Skyrim SE.exe");
-            candidateNames.push_back(L"Fallout4.exe");
-            candidateNames.push_back(L"Starfield.exe");
-
             std::vector<std::wstring> seen;
-            for (const std::wstring& candidateName : candidateNames)
+            for (const std::wstring& candidateName : resolved.executables)
             {
                 const std::wstring key = toLower(candidateName);
                 if (std::find(seen.begin(), seen.end(), key) != seen.end())
@@ -1295,9 +1372,13 @@ namespace fluxora
             }
 
             std::wstring displayName = fileNameWithoutExtension(executablePath.value());
-            if (equalsIgnoreCase(resolved.id, L"skyrimse"))
+            if (!resolved.gameName.empty())
             {
-                displayName = L"Skyrim Special Edition";
+                displayName = resolved.gameName;
+            }
+            else if (!resolved.displayName.empty())
+            {
+                displayName = resolved.displayName;
             }
 
             writer.key(L"launchExecutables").beginArray();
@@ -1309,6 +1390,463 @@ namespace fluxora
             writer.field(L"workingDirectory", L"");
             writer.endObject();
             writer.endArray();
+        }
+
+        std::string healthFailureMessage(const GameHealthCheckResult& health)
+        {
+            std::wstring message = health.summary.empty()
+                ? L"Game health check failed."
+                : health.summary;
+            for (const GameHealthFinding& finding : health.findings)
+            {
+                if (finding.severity == HealthSeverity::Blocker || finding.critical)
+                {
+                    message += L" ";
+                    message += finding.message;
+                    break;
+                }
+            }
+
+            return toUtf8(message);
+        }
+
+        [[nodiscard]] std::string joinForLog(const std::vector<std::wstring>& values)
+        {
+            std::string joined;
+            for (const std::wstring& value : values)
+            {
+                if (!joined.empty())
+                {
+                    joined += "|";
+                }
+                joined += toUtf8(value);
+            }
+
+            return joined.empty() ? std::string("<none>") : joined;
+        }
+
+        void logDetectionDiagnostics(
+            Logger& logger,
+            std::string_view operation,
+            const GameDetectionResult& detection)
+        {
+            logger.writeOperation(
+                detection.detected ? LogLevel::Info : LogLevel::Warning,
+                "GameDetection",
+                std::string(operation) +
+                    " selectedGameId=\"" + toUtf8(detection.gameId.value()) + "\"" +
+                    ", definitionVersion=\"" +
+                    toUtf8(detection.definition == nullptr ? std::wstring() : detection.definition->definitionVersion) + "\"" +
+                    ", detectionSource=\"" + toUtf8(GameDetectionService::detectionSourceName(detection.source)) + "\"" +
+                    ", detectionConfidence=\"" +
+                    toUtf8(GameDetectionService::detectionConfidenceName(detection.confidence)) + "\"" +
+                    ", matchedHints=\"" + joinForLog(detection.matchedFiles) + "\"" +
+                    ", missingFiles=\"" + joinForLog(detection.missingFiles) + "\"" +
+                    ", warnings=\"" + joinForLog(detection.warnings) + "\"" +
+                    ", ambiguousCandidates=" + std::to_string(detection.ambiguousCandidates.size()) + ".");
+        }
+
+        void logHealthDiagnostics(
+            Logger& logger,
+            std::string_view operation,
+            const GameHealthCheckResult& health)
+        {
+            std::string findings;
+            for (const GameHealthFinding& finding : health.findings)
+            {
+                if (!findings.empty())
+                {
+                    findings += "|";
+                }
+                findings += toUtf8(finding.code) + ":" +
+                    toUtf8(GameHealthCheckService::healthSeverityName(finding.severity));
+            }
+            if (findings.empty())
+            {
+                findings = "<none>";
+            }
+
+            logger.writeOperation(
+                health.allowsAutomation() ? LogLevel::Info : LogLevel::Warning,
+                "GameHealth",
+                std::string(operation) +
+                    " selectedGameId=\"" + toUtf8(health.gameId.value()) + "\"" +
+                    ", healthResult=\"" + toUtf8(GameHealthCheckService::healthStatusName(health.status)) + "\"" +
+                    ", missingFiles=\"" + joinForLog(health.missingFiles) + "\"" +
+                    ", matchedFiles=\"" + joinForLog(health.matchedFiles) + "\"" +
+                    ", versionResult=\"unavailable\"" +
+                    ", findings=\"" + findings + "\"" +
+                    ", summary=\"" + toUtf8(health.summary) + "\".");
+        }
+
+        void logProjectFingerprintDiagnostics(
+            Logger& logger,
+            std::string_view operation,
+            const ProjectFingerprint& fingerprint)
+        {
+            logger.writeOperation(
+                LogLevel::Info,
+                "ProjectDiagnostics",
+                std::string(operation) +
+                    " projectFingerprint gameId=\"" + toUtf8(fingerprint.gameId) + "\"" +
+                    ", definitionVersion=\"" + toUtf8(fingerprint.gameDefinitionVersion) + "\"" +
+                    ", detectionSource=\"" + toUtf8(fingerprint.detectionSource) + "\"" +
+                    ", detectionConfidence=\"" + toUtf8(fingerprint.detectionConfidence) + "\"" +
+                    ", healthResult=\"" + toUtf8(fingerprint.healthStatusAtCreation) + "\"" +
+                    ", versionResult=\"" +
+                    (fingerprint.gameVersion.empty() ? std::string("unavailable") : toUtf8(fingerprint.gameVersion)) + "\"" +
+                    ", canonicalInstallPath=\"" + toUtf8(fingerprint.canonicalInstallPath.wstring()) + "\"" +
+                    ", selectedExecutable=\"" + toUtf8(fingerprint.selectedExecutable.wstring()) + "\".");
+        }
+
+        void logOptionalProjectFingerprintDiagnostics(
+            Logger& logger,
+            std::string_view operation,
+            const std::optional<ProjectFingerprint>& fingerprint)
+        {
+            if (fingerprint.has_value())
+            {
+                logProjectFingerprintDiagnostics(logger, operation, fingerprint.value());
+            }
+            else
+            {
+                logger.writeOperation(
+                    LogLevel::Warning,
+                    "ProjectDiagnostics",
+                    std::string(operation) + " projectFingerprint=<missing>.");
+            }
+        }
+
+        [[nodiscard]] bool confidenceAllowsLegacyTemplateMigration(DetectionConfidence confidence) noexcept
+        {
+            return confidence == DetectionConfidence::High ||
+                confidence == DetectionConfidence::Explicit;
+        }
+
+        [[nodiscard]] GameDetectionRequest buildManifestDetectionRequest(
+            const JsonValue& manifest,
+            const std::filesystem::path& projectDirectory)
+        {
+            GameDetectionRequest request;
+            std::filesystem::path gamePath =
+                resolveManifestPath(readStringOrDefault(manifest, L"gamePath"), projectDirectory);
+            if (isRegularFile(gamePath) && hasExecutableExtension(gamePath))
+            {
+                request.executablePaths.push_back(gamePath);
+                gamePath = gamePath.parent_path();
+            }
+            request.installPath = gamePath;
+
+            if (const std::wstring gameName = readStringOrDefault(manifest, L"gameName"); !gameName.empty())
+            {
+                request.nameHints.push_back(gameName);
+            }
+            if (const std::wstring name = readStringOrDefault(manifest, L"name"); !name.empty())
+            {
+                request.nameHints.push_back(name);
+            }
+            if (const std::wstring domain = readStringOrDefault(manifest, L"nexusDomain"); !domain.empty())
+            {
+                request.domainHints.push_back(domain);
+            }
+
+            return request;
+        }
+
+        [[nodiscard]] std::wstring resolveTemplateIdFromManifest(
+            const JsonValue& manifest,
+            const std::filesystem::path& manifestDirectory,
+            Logger& logger)
+        {
+            if (const std::wstring templateId = readStringOrDefault(manifest, L"templateId"); !templateId.empty())
+            {
+                return templateId;
+            }
+            if (const std::wstring gameId = readStringOrDefault(manifest, L"gameId"); !gameId.empty())
+            {
+                return gameId;
+            }
+
+            std::filesystem::path projectDirectory = resolveManifestPath(
+                readStringOrDefault(manifest, L"projectDirectory", manifestDirectory.wstring()),
+                manifestDirectory);
+            if (projectDirectory.empty())
+            {
+                projectDirectory = manifestDirectory;
+            }
+
+            GameDetectionRequest request = buildManifestDetectionRequest(manifest, projectDirectory);
+            if (request.installPath.empty() && request.executablePaths.empty())
+            {
+                throw std::invalid_argument("Build config does not declare a supported game id.");
+            }
+
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameDetectionResult detection = GameDetectionService(registry).detect(request);
+            logDetectionDiagnostics(logger, "manifestMigration templateDetection", detection);
+            if (!detection.detected ||
+                !confidenceAllowsLegacyTemplateMigration(detection.confidence))
+            {
+                if (detection.source == DetectionSource::Ambiguous)
+                {
+                    throw std::invalid_argument(
+                        "Build config game detection is ambiguous; choose a supported game before opening this project.");
+                }
+
+                throw std::invalid_argument("Build config does not declare a supported game id.");
+            }
+
+            return detection.gameId.value();
+        }
+
+        [[nodiscard]] std::string buildMigratedManifest(
+            const JsonValue& manifest,
+            std::wstring_view resolvedTemplateId,
+            const ProjectFingerprint& fingerprint)
+        {
+            JsonWriter writer;
+            writer.beginObject();
+            for (const auto& [key, value] : manifest.asObject())
+            {
+                if (key == L"templateId" ||
+                    key == L"gameId" ||
+                    key == L"gameDisplayName" ||
+                    key == L"projectFingerprint")
+                {
+                    continue;
+                }
+
+                writer.key(key);
+                writeJsonValue(writer, value);
+            }
+
+            writer.field(L"templateId", resolvedTemplateId);
+            writer.field(L"gameId", fingerprint.gameId);
+            writer.field(L"gameDisplayName", fingerprint.gameDisplayName);
+            writer.key(L"projectFingerprint");
+            writeProjectFingerprint(writer, fingerprint);
+            writer.endObject();
+            return toUtf8(writer.str());
+        }
+
+        [[nodiscard]] std::optional<ProjectFingerprint> migrateManifestFingerprintIfSupported(
+            const JsonValue& manifest,
+            std::wstring_view resolvedTemplateId,
+            const std::filesystem::path& absoluteConfigPath,
+            const std::filesystem::path& projectDirectory,
+            const std::filesystem::path& gamePath,
+            Logger& logger)
+        {
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            const GameSupportLookupResult lookup = registry.lookupById(resolvedTemplateId);
+            if (!lookup.supported || lookup.support == nullptr)
+            {
+                return std::nullopt;
+            }
+
+            const GameSupportComponents& components = lookup.support->components();
+            if (components.manifestMigrationProvider == nullptr ||
+                !components.manifestMigrationProvider->manifestMigrationRules().supportsAutomaticMigration)
+            {
+                return std::nullopt;
+            }
+
+            if (gamePath.empty())
+            {
+                logger.writeOperation(
+                    LogLevel::Warning,
+                    "ProjectDiagnostics",
+                    "manifestMigration skipped selectedGameId=\"" + toUtf8(lookup.support->identity().id.value()) +
+                        "\", reason=\"missing game path\".");
+                return std::nullopt;
+            }
+
+            GameDetectionRequest detectionRequest = buildManifestDetectionRequest(manifest, projectDirectory);
+            detectionRequest.manualGameId = lookup.support->identity().id;
+            const GameDetectionResult detection = GameDetectionService(registry).detect(detectionRequest);
+            logDetectionDiagnostics(logger, "manifestMigration detection", detection);
+            if (!detection.detected)
+            {
+                logger.writeOperation(
+                    LogLevel::Warning,
+                    "ProjectDiagnostics",
+                    "manifestMigration skipped selectedGameId=\"" + toUtf8(lookup.support->identity().id.value()) +
+                        "\", reason=\"game detection did not produce a supported result\".");
+                return std::nullopt;
+            }
+
+            const GameHealthCheckResult health = GameHealthCheckService().check(detection);
+            logHealthDiagnostics(logger, "manifestMigration healthCheck", health);
+            std::optional<std::filesystem::path> selectedExecutable;
+            if (!detection.selectedExecutable.empty())
+            {
+                selectedExecutable = detection.selectedExecutable;
+            }
+
+            ProjectFingerprint fingerprint = createProjectFingerprint(
+                detection,
+                health,
+                detection.selectedInstallPath.empty() ? gamePath : detection.selectedInstallPath,
+                selectedExecutable);
+            logProjectFingerprintDiagnostics(logger, "manifestMigration", fingerprint);
+
+            writeStateFile(
+                absoluteConfigPath,
+                buildMigratedManifest(manifest, resolvedTemplateId, fingerprint),
+                L"project manifest",
+                ProjectStateValidation::JsonObject);
+            logger.writeOperation(
+                LogLevel::Info,
+                "ProjectDiagnostics",
+                "manifestMigration completed selectedGameId=\"" + toUtf8(fingerprint.gameId) +
+                    "\", definitionVersion=\"" + toUtf8(fingerprint.gameDefinitionVersion) +
+                    "\", healthResult=\"" + toUtf8(fingerprint.healthStatusAtCreation) +
+                    "\", configPath=\"" + toUtf8(absoluteConfigPath.wstring()) + "\".");
+            return fingerprint;
+        }
+
+        void recoverProjectDirectoryState(
+            const std::filesystem::path& projectDirectory,
+            const BuildTemplate& resolved,
+            Logger& logger)
+        {
+            if (projectDirectory.empty())
+            {
+                return;
+            }
+
+            AtomicFileStore store;
+            static_cast<void>(ProjectStateTransaction::recoverDirectory(projectDirectory, store, &logger));
+
+            const std::filesystem::path localSettingsDirectory = projectDirectory / L".fluxora";
+            static_cast<void>(ProjectStateTransaction::recoverDirectory(localSettingsDirectory, store, &logger));
+            recoverStateFile(
+                localSettingsDirectory / L"paths.json",
+                L"profile path settings",
+                ProjectStateValidation::JsonObject,
+                logger);
+
+            const std::filesystem::path profilesRoot = projectDirectory / L"profiles";
+            std::error_code error;
+            if (std::filesystem::exists(profilesRoot, error) &&
+                std::filesystem::is_directory(profilesRoot, error))
+            {
+                for (const auto& entry : std::filesystem::directory_iterator(
+                         profilesRoot,
+                         std::filesystem::directory_options::skip_permission_denied,
+                         error))
+                {
+                    if (error)
+                    {
+                        break;
+                    }
+                    std::error_code statusError;
+                    if (!entry.is_directory(statusError))
+                    {
+                        continue;
+                    }
+
+                    static_cast<void>(ProjectStateTransaction::recoverDirectory(entry.path(), store, &logger));
+                    for (const std::wstring& profileFile : resolved.profileFiles)
+                    {
+                        recoverStateFile(
+                            entry.path() / std::filesystem::path(profileFile),
+                            L"profile state file",
+                            ProjectStateValidation::Utf8Text,
+                            logger);
+                    }
+                }
+            }
+
+            const std::filesystem::path modsRoot = projectDirectory / L"mods";
+            if (std::filesystem::exists(modsRoot, error) &&
+                std::filesystem::is_directory(modsRoot, error))
+            {
+                for (const auto& entry : std::filesystem::directory_iterator(
+                         modsRoot,
+                         std::filesystem::directory_options::skip_permission_denied,
+                         error))
+                {
+                    if (error)
+                    {
+                        break;
+                    }
+                    std::error_code statusError;
+                    if (!entry.is_directory(statusError))
+                    {
+                        continue;
+                    }
+
+                    recoverStateFile(
+                        entry.path() / L".flow" / L"manifest.json",
+                        L"generated mod metadata",
+                        ProjectStateValidation::JsonObject,
+                        logger);
+                }
+            }
+        }
+
+        void recoverBuildCatalogState(const TemplateService& templates, Logger& logger)
+        {
+            const std::filesystem::path catalogDirectory = resolveBuildManifestDirectory();
+            AtomicFileStore store;
+            static_cast<void>(ProjectStateTransaction::recoverDirectory(catalogDirectory, store, &logger));
+
+            std::error_code error;
+            if (!std::filesystem::exists(catalogDirectory, error) ||
+                !std::filesystem::is_directory(catalogDirectory, error))
+            {
+                return;
+            }
+
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     catalogDirectory,
+                     std::filesystem::directory_options::skip_permission_denied,
+                     error))
+            {
+                if (error)
+                {
+                    break;
+                }
+                std::error_code statusError;
+                if (!entry.is_regular_file(statusError) ||
+                    !hasExtensionIgnoreCase(entry.path(), manifestFileExtension))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    recoverStateFile(
+                        entry.path(),
+                        L"project manifest",
+                        ProjectStateValidation::JsonObject,
+                        logger);
+
+                    const std::filesystem::path manifestDirectory = entry.path().parent_path();
+                    const JsonValue manifest = parseJsonConfig(readTextFile(entry.path()));
+                    const std::wstring templateId =
+                        resolveTemplateIdFromManifest(manifest, manifestDirectory, logger);
+                    const BuildTemplate resolved = buildTemplateFromManifest(manifest, templates, templateId);
+                    std::filesystem::path projectDirectory = resolveManifestPath(
+                        readStringOrDefault(manifest, L"projectDirectory", manifestDirectory.wstring()),
+                        manifestDirectory);
+                    if (projectDirectory.empty())
+                    {
+                        projectDirectory = manifestDirectory;
+                    }
+
+                    recoverProjectDirectoryState(projectDirectory, resolved, logger);
+                }
+                catch (const std::exception& exception)
+                {
+                    logger.write(
+                        LogLevel::Warning,
+                        "ProjectStateRecovery",
+                        std::string("Skipped project state recovery for catalog manifest \"") +
+                            toUtf8(entry.path().wstring()) + "\": " + exception.what());
+                }
+            }
         }
     }
 
@@ -1325,6 +1863,7 @@ namespace fluxora
             return;
         }
 
+        recoverBuildCatalogState(templates_, logger_);
         initialized_ = true;
         logger_.write(LogLevel::Info, "Project service initialized.");
     }
@@ -1350,63 +1889,157 @@ namespace fluxora
 
     ProjectDescriptor ProjectService::createProject(const ProjectCreateRequest& request)
     {
-        if (request.name.empty())
-        {
-            throw std::invalid_argument("Project name is required.");
-        }
+        logger_.writeOperation(
+            LogLevel::Info,
+            "ProjectDiagnostics",
+            "createProject requested projectName=\"" + toUtf8(request.name) +
+                "\", templateId=\"" + toUtf8(request.templateId) +
+                "\", selectedGamePath=\"" + toUtf8(request.gamePath.wstring()) +
+                "\", installRoot=\"" + toUtf8(request.installRootDirectory.wstring()) + "\".");
 
-        if (request.templateId.empty())
+        try
         {
-            throw std::invalid_argument("Game template is required.");
-        }
-
-        // Resolve the build template (base + game overlay) up front; an unknown
-        // template id throws std::invalid_argument and surfaces to the UI.
-        const BuildTemplate resolved = templates_.resolve(request.templateId);
-
-        std::filesystem::path gameDirectory = std::filesystem::absolute(request.gamePath).lexically_normal();
-        if (isRegularFile(gameDirectory))
-        {
-            if (!hasExecutableExtension(gameDirectory))
+            if (request.name.empty())
             {
-                throw std::invalid_argument("Game executable path must point to an .exe file.");
+                throw std::invalid_argument("Project name is required.");
             }
 
-            gameDirectory = gameDirectory.parent_path();
-        }
+            if (request.templateId.empty())
+            {
+                throw std::invalid_argument("Game template is required.");
+            }
 
-        if (!isDirectory(gameDirectory))
+            // Resolve the build template (base + game overlay) up front; an unknown
+            // template id throws std::invalid_argument and surfaces to the UI.
+            const BuildTemplate resolved = templates_.resolve(request.templateId);
+
+            if (request.gamePath.empty())
+            {
+                throw std::invalid_argument("Game directory is required.");
+            }
+
+            std::filesystem::path gameDirectory = std::filesystem::absolute(request.gamePath).lexically_normal();
+            if (isRegularFile(gameDirectory) ||
+                (!request.validateGameDirectory && hasExecutableExtension(gameDirectory)))
+            {
+                if (!hasExecutableExtension(gameDirectory))
+                {
+                    throw std::invalid_argument("Game executable path must point to an .exe file.");
+                }
+
+                gameDirectory = gameDirectory.parent_path();
+            }
+
+            std::optional<ProjectFingerprint> fingerprint;
+            if (request.validateGameDirectory)
+            {
+                if (!isDirectory(gameDirectory))
+                {
+                    throw std::invalid_argument("Game directory does not exist.");
+                }
+
+                const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+                GameDetectionService detectionService(registry);
+                GameDetectionRequest detectionRequest;
+                detectionRequest.manualGameId = GameId::parseOrThrow(resolved.id);
+                detectionRequest.installPath = gameDirectory;
+                const GameDetectionResult detection = detectionService.detect(detectionRequest);
+                logDetectionDiagnostics(logger_, "createProject detection", detection);
+                if (!detection.detected)
+                {
+                    throw std::invalid_argument("Game could not be detected from the selected path.");
+                }
+
+                GameHealthCheckService healthService;
+                const GameHealthCheckResult health = healthService.check(detection);
+                logHealthDiagnostics(logger_, "createProject healthCheck", health);
+                if (!health.allowsAutomation())
+                {
+                    throw std::invalid_argument(healthFailureMessage(health));
+                }
+
+                std::optional<std::filesystem::path> selectedExecutable;
+                if (!detection.selectedExecutable.empty())
+                {
+                    selectedExecutable = detection.selectedExecutable;
+                }
+                fingerprint = createProjectFingerprint(
+                    detection,
+                    health,
+                    gameDirectory,
+                    selectedExecutable);
+                logProjectFingerprintDiagnostics(logger_, "createProject", fingerprint.value());
+            }
+            else
+            {
+                logger_.writeOperation(
+                    LogLevel::Info,
+                    "ProjectDiagnostics",
+                    "createProject deferred game directory validation selectedGamePath=\"" +
+                        toUtf8(gameDirectory.wstring()) + "\".");
+            }
+
+            const auto normalizedRoot = normalizeRootDirectory(request.installRootDirectory);
+            if (!std::filesystem::exists(normalizedRoot) || !std::filesystem::is_directory(normalizedRoot))
+            {
+                throw std::invalid_argument("Install root directory does not exist.");
+            }
+            PathSafetyService().validateDirectoryWriteRoot(normalizedRoot)
+                .throwIfUnsafe("Install root directory is unsafe");
+
+            const auto projectDirectory = buildProjectDirectory(normalizedRoot, request.name);
+            PathSafetyService().validateWritePath(normalizedRoot, projectDirectory)
+                .throwIfUnsafe("Project directory is unsafe");
+            const auto manifestPath = buildManifestPath(request.name);
+
+            materializeTemplate(projectDirectory, resolved);
+
+            ProjectDescriptor project{
+                request.name,
+                resolved.id,
+                resolved.gameName,
+                gameDirectory,
+                normalizedRoot,
+                projectDirectory,
+                manifestPath,
+                std::move(fingerprint)
+            };
+
+            writeBuildManifest(project, resolved);
+            InstanceMetadataStore::ensureInstance(project.projectDirectory, resolved.id);
+
+            if (project.fingerprint.has_value())
+            {
+                logger_.writeOperation(
+                    LogLevel::Info,
+                    "ProjectDiagnostics",
+                    "createProject completed selectedGameId=\"" + toUtf8(project.fingerprint->gameId) +
+                        "\", definitionVersion=\"" + toUtf8(project.fingerprint->gameDefinitionVersion) +
+                        "\", healthResult=\"" + toUtf8(project.fingerprint->healthStatusAtCreation) +
+                        "\", projectDirectory=\"" + toUtf8(projectDirectory.wstring()) + "\".");
+            }
+            else
+            {
+                logger_.writeOperation(
+                    LogLevel::Info,
+                    "ProjectDiagnostics",
+                    "createProject completed with deferred game validation projectDirectory=\"" +
+                        toUtf8(projectDirectory.wstring()) + "\".");
+            }
+            logger_.write(LogLevel::Info, "Project structure created from template.");
+            projects_.push_back(project);
+            return project;
+        }
+        catch (const std::exception& exception)
         {
-            throw std::invalid_argument("Game directory does not exist.");
+            logger_.writeOperation(
+                LogLevel::Error,
+                "ProjectDiagnostics",
+                "createProject blocked selectedGamePath=\"" + toUtf8(request.gamePath.wstring()) +
+                    "\", templateId=\"" + toUtf8(request.templateId) +
+                    "\", reason=\"" + exception.what() + "\".");
+            throw;
         }
-
-        const auto normalizedRoot = normalizeRootDirectory(request.installRootDirectory);
-        if (!std::filesystem::exists(normalizedRoot) || !std::filesystem::is_directory(normalizedRoot))
-        {
-            throw std::invalid_argument("Install root directory does not exist.");
-        }
-
-        const auto projectDirectory = buildProjectDirectory(normalizedRoot, request.name);
-        const auto manifestPath = buildManifestPath(request.name);
-
-        materializeTemplate(projectDirectory, resolved);
-
-        ProjectDescriptor project{
-            request.name,
-            resolved.id,
-            resolved.gameName,
-            gameDirectory,
-            normalizedRoot,
-            projectDirectory,
-            manifestPath
-        };
-
-        writeBuildManifest(project, resolved);
-        InstanceMetadataStore::ensureInstance(project.projectDirectory, resolved.id);
-
-        logger_.write(LogLevel::Info, "Project structure created from template.");
-        projects_.push_back(project);
-        return project;
     }
 
     ProjectOpenResult ProjectService::readProjectConfigSummary(const std::filesystem::path& configPath) const
@@ -1422,11 +2055,14 @@ namespace fluxora
             throw std::invalid_argument("Build config file does not exist.");
         }
 
+        recoverStateFile(
+            absoluteConfigPath,
+            L"project manifest",
+            ProjectStateValidation::JsonObject,
+            logger_);
         const JsonValue manifest = parseJsonConfig(readTextFile(absoluteConfigPath));
         requireObject(manifest);
         const auto manifestDirectory = absoluteConfigPath.parent_path();
-        BuildTemplate resolved = buildTemplateFromManifest(manifest, templates_);
-
         std::filesystem::path projectDirectory = resolveManifestPath(
             readStringOrDefault(manifest, L"projectDirectory", manifestDirectory.wstring()),
             manifestDirectory);
@@ -1440,19 +2076,57 @@ namespace fluxora
             throw std::invalid_argument("Build project directory does not exist.");
         }
 
+        const std::wstring resolvedTemplateId =
+            resolveTemplateIdFromManifest(manifest, manifestDirectory, logger_);
+        BuildTemplate resolved = buildTemplateFromManifest(manifest, templates_, resolvedTemplateId);
+
         const std::wstring installRootText = readStringOrDefault(
             manifest,
             L"installRoot",
             readStringOrDefault(manifest, L"installRootDirectory"));
+        const std::filesystem::path gamePath =
+            resolveManifestPath(readStringOrDefault(manifest, L"gamePath"), projectDirectory);
+        std::optional<ProjectFingerprint> fingerprint = readProjectFingerprintField(manifest);
+        const bool manifestHadProjectFingerprint = fingerprint.has_value();
+        if (!fingerprint.has_value())
+        {
+            fingerprint = readProjectFingerprintCompatibilityFields(manifest);
+            if (fingerprint.has_value())
+            {
+                logger_.writeOperation(
+                    LogLevel::Info,
+                    "ProjectDiagnostics",
+                    "manifestMigration compatibilityFingerprint hydrated configPath=\"" +
+                        toUtf8(absoluteConfigPath.wstring()) +
+                        "\", selectedGameId=\"" + toUtf8(fingerprint->gameId) +
+                        "\", definitionVersion=\"" + toUtf8(fingerprint->gameDefinitionVersion) +
+                        "\", detectionSource=\"" + toUtf8(fingerprint->detectionSource) +
+                        "\", detectionConfidence=\"" + toUtf8(fingerprint->detectionConfidence) + "\".");
+            }
+        }
+        if (!manifestHadProjectFingerprint)
+        {
+            if (std::optional<ProjectFingerprint> migrated = migrateManifestFingerprintIfSupported(
+                    manifest,
+                    resolvedTemplateId,
+                    absoluteConfigPath,
+                    projectDirectory,
+                    gamePath,
+                    logger_))
+            {
+                fingerprint = std::move(migrated);
+            }
+        }
 
         ProjectDescriptor project{
             readRequiredString(manifest, L"name"),
             resolved.id,
             resolved.gameName,
-            resolveManifestPath(readStringOrDefault(manifest, L"gamePath"), projectDirectory),
+            gamePath,
             resolveManifestPath(installRootText, projectDirectory),
             projectDirectory,
-            absoluteConfigPath
+            absoluteConfigPath,
+            std::move(fingerprint)
         };
 
         return ProjectOpenResult{
@@ -1525,8 +2199,20 @@ namespace fluxora
     {
         ProjectOpenResult result = readProjectConfigSummary(configPath);
         const ProjectDescriptor& project = result.project;
+        recoverProjectDirectoryState(project.projectDirectory, result.resolvedTemplate, logger_);
         InstanceMetadataStore::ensureInstance(project.projectDirectory, result.resolvedTemplate.id);
 
+        logger_.writeOperation(
+            LogLevel::Info,
+            "ProjectDiagnostics",
+            "openProject selectedGameId=\"" + toUtf8(result.resolvedTemplate.id) +
+                "\", definitionVersion=\"" +
+                (project.fingerprint.has_value()
+                    ? toUtf8(project.fingerprint->gameDefinitionVersion)
+                    : std::string("<missing>")) +
+                "\", configPath=\"" + toUtf8(project.configPath.wstring()) +
+                "\", projectDirectory=\"" + toUtf8(project.projectDirectory.wstring()) + "\".");
+        logOptionalProjectFingerprintDiagnostics(logger_, "openProject", project.fingerprint);
         logger_.write(LogLevel::Info, "Project opened from build config.");
         projects_.push_back(project);
 
@@ -1570,9 +2256,16 @@ namespace fluxora
         }
 
         std::filesystem::create_directories(renamed.configPath.parent_path());
-        const std::filesystem::path temporaryConfigPath =
-            renamed.configPath.parent_path() / std::filesystem::path(L".fluxora-rename.tmp");
-        writeTextFile(temporaryConfigPath, buildUpdatedManifest(manifest, renamed));
+        AtomicFileStore fileStore;
+        ProjectStateTransaction transaction(
+            fileStore,
+            renamed.configPath.parent_path(),
+            L"project rename",
+            &logger_);
+        transaction.trackFile(
+            renamed.configPath,
+            L"project manifest",
+            ProjectStateValidation::JsonObject);
 
         try
         {
@@ -1582,21 +2275,23 @@ namespace fluxora
                 std::filesystem::rename(previous.projectDirectory, renamed.projectDirectory);
             }
 
-            std::filesystem::copy_file(
-                temporaryConfigPath,
+            fileStore.writeTextFile(
                 renamed.configPath,
-                std::filesystem::copy_options::overwrite_existing);
-            std::filesystem::remove(temporaryConfigPath);
+                buildUpdatedManifest(manifest, renamed),
+                AtomicFileWriteOptions{
+                    L"project manifest",
+                    ProjectStateValidation::JsonObject
+                });
 
             if (movesConfig && std::filesystem::exists(previous.configPath))
             {
                 std::filesystem::remove(previous.configPath);
             }
+
+            transaction.commit();
         }
         catch (...)
         {
-            std::error_code cleanupError;
-            std::filesystem::remove(temporaryConfigPath, cleanupError);
             throw;
         }
 
@@ -1756,21 +2451,45 @@ namespace fluxora
         const auto profileDirectory = projectDirectory / L"profiles" / std::filesystem::path(profileName);
         std::filesystem::create_directories(profileDirectory);
 
+        AtomicFileStore fileStore;
+        ProjectStateTransaction transaction(
+            fileStore,
+            profileDirectory,
+            L"profile seed",
+            &logger_);
+
+        const GameSupportLookupResult lookup = GameSupportRegistry::embedded().lookupById(resolved.id);
+        const PluginSupportRules* pluginRules =
+            lookup.supported &&
+            lookup.support != nullptr &&
+            lookup.support->components().pluginRulesProvider != nullptr
+                ? &lookup.support->components().pluginRulesProvider->pluginRules()
+                : nullptr;
+        const std::wstring activePluginsFileName =
+            pluginRules != nullptr && !pluginRules->activePluginsFileName.empty()
+                ? pluginRules->activePluginsFileName
+                : std::wstring(L"plugins.txt");
+        const std::wstring loadOrderFileName =
+            pluginRules != nullptr && !pluginRules->loadOrderFileName.empty()
+                ? pluginRules->loadOrderFileName
+                : std::wstring(L"loadorder.txt");
+
         for (const auto& profileFile : resolved.profileFiles)
         {
             std::string content;
 
-            // The game template's base plugins seed the new profile so the
-            // resolved build is immediately game-correct: a Skyrim build lists
-            // Skyrim's masters, a build for another game never would.
-            if (profileFile == L"plugins.txt")
+            // The selected game template seeds its own base plugins so a new
+            // profile starts with the rules supplied by that game module.
+            const std::wstring profileFileName = std::filesystem::path(profileFile).filename().wstring();
+
+            if (equalsIgnoreCase(profileFileName, std::filesystem::path(activePluginsFileName).filename().wstring()))
             {
                 for (const auto& plugin : resolved.basePlugins)
                 {
                     content += "*" + toUtf8(plugin) + "\n";
                 }
             }
-            else if (profileFile == L"loadorder.txt")
+            else if (equalsIgnoreCase(profileFileName, std::filesystem::path(loadOrderFileName).filename().wstring()))
             {
                 for (const auto& plugin : resolved.basePlugins)
                 {
@@ -1778,8 +2497,22 @@ namespace fluxora
                 }
             }
 
-            writeTextFile(profileDirectory / std::filesystem::path(profileFile), content);
+            const std::filesystem::path profileFilePath =
+                profileDirectory / std::filesystem::path(profileFile);
+            transaction.trackFile(
+                profileFilePath,
+                L"profile state file",
+                ProjectStateValidation::Utf8Text);
+            fileStore.writeTextFile(
+                profileFilePath,
+                content,
+                AtomicFileWriteOptions{
+                    L"profile state file",
+                    ProjectStateValidation::Utf8Text
+                });
         }
+
+        transaction.commit();
     }
 
     void ProjectService::writeBuildManifest(
@@ -1793,6 +2526,11 @@ namespace fluxora
         writer.field(L"templateId", resolved.id);
         writer.field(L"baseTemplateId", resolved.baseTemplateId);
         writer.field(L"gameName", resolved.gameName);
+        if (project.fingerprint.has_value())
+        {
+            writer.field(L"gameId", project.fingerprint->gameId);
+            writer.field(L"gameDisplayName", project.fingerprint->gameDisplayName);
+        }
         writer.field(L"gamePath", project.gamePath.wstring());
         writer.field(L"installRoot", project.installRootDirectory.wstring());
         writer.field(L"projectDirectory", project.projectDirectory.wstring());
@@ -1832,9 +2570,19 @@ namespace fluxora
             writer.key(L"scriptExtender").nullValue();
         }
 
+        if (project.fingerprint.has_value())
+        {
+            writer.key(L"projectFingerprint");
+            writeProjectFingerprint(writer, project.fingerprint.value());
+        }
+
         writer.endObject();
 
-        writeTextFile(project.configPath, toUtf8(writer.str()));
+        writeStateFile(
+            project.configPath,
+            toUtf8(writer.str()),
+            L"project manifest",
+            ProjectStateValidation::JsonObject);
     }
 
     const std::vector<ProjectDescriptor>& ProjectService::projects() const noexcept

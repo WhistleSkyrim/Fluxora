@@ -13,10 +13,13 @@
 #include <filesystem>
 #include <iomanip>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -226,12 +229,32 @@ namespace fluxora
 #endif
         }
 
-        std::wstring buildNexusAuthorizationHeader(const AppSettingsService& settings)
+        std::string nexusAuthUnavailableMessage(const AppSettingsService& settings)
         {
             const NexusModsStoredAuth auth = settings.loadNexusModsAuth();
-            if (!auth.linked || auth.protectedAccessToken.empty())
+            if (!auth.linked || (auth.protectedAccessToken.empty() && auth.protectedApiKey.empty()))
+            {
+                return "NexusMods account is not linked. Connect NexusMods in settings.";
+            }
+
+            return "NexusMods authentication token is not available. Reconnect NexusMods in settings and try again.";
+        }
+
+        std::wstring buildNexusAuthHeader(const AppSettingsService& settings)
+        {
+            const NexusModsStoredAuth auth = settings.loadNexusModsAuth();
+            if (!auth.linked)
             {
                 return {};
+            }
+
+            if (!auth.protectedApiKey.empty())
+            {
+                const std::wstring apiKey = unprotectSecret(auth.protectedApiKey);
+                if (!apiKey.empty())
+                {
+                    return L"apikey: " + apiKey + L"\r\n";
+                }
             }
 
             const std::wstring accessToken = unprotectSecret(auth.protectedAccessToken);
@@ -573,17 +596,17 @@ namespace fluxora
             (void)settings;
             return {};
 #else
-            const std::wstring authorizationHeader = buildNexusAuthorizationHeader(settings);
-            if (authorizationHeader.empty())
+            const std::wstring authHeader = buildNexusAuthHeader(settings);
+            if (authHeader.empty())
             {
-                throw std::runtime_error("NexusMods account is not linked. Connect NexusMods in settings.");
+                throw std::runtime_error(nexusAuthUnavailableMessage(settings));
             }
 
             const std::wstring endpoint =
                 L"https://api.nexusmods.com/v1/games/" + percentEncode(mod.source.gameDomain) +
                 L"/mods/" + percentEncode(mod.source.remoteModId) +
                 L"/files.json";
-            const std::string body = winHttpGet(endpoint, authorizationHeader);
+            const std::string body = winHttpGet(endpoint, authHeader);
             const std::wstring payload = fromUtf8(body);
             const JsonValue root = JsonReader::parse(payload);
             return selectLatestFile(root, mod.source, payload);
@@ -700,6 +723,166 @@ namespace fluxora
             }
 
             return candidateText.starts_with(directoryText);
+        }
+
+        std::filesystem::path nativeDeletePath(const std::filesystem::path& path)
+        {
+#ifdef _WIN32
+            std::wstring text = std::filesystem::absolute(path).lexically_normal().wstring();
+            if (text.rfind(LR"(\\?\)", 0) == 0)
+            {
+                return std::filesystem::path(text);
+            }
+
+            if (text.rfind(LR"(\\)", 0) == 0)
+            {
+                return std::filesystem::path(LR"(\\?\UNC\)" + text.substr(2));
+            }
+
+            return std::filesystem::path(LR"(\\?\)" + text);
+#else
+            return path;
+#endif
+        }
+
+        void clearReadonlyAttribute(const std::filesystem::path& path)
+        {
+#ifdef _WIN32
+            const std::filesystem::path nativePath = nativeDeletePath(path);
+            const DWORD attributes = GetFileAttributesW(nativePath.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_READONLY) == 0)
+            {
+                return;
+            }
+
+            SetFileAttributesW(nativePath.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY);
+#else
+            (void)path;
+#endif
+        }
+
+        void removePathWithRetry(const std::filesystem::path& path)
+        {
+            constexpr int maxAttempts = 3;
+
+            for (int attempt = 0; attempt < maxAttempts; ++attempt)
+            {
+                clearReadonlyAttribute(path);
+                const std::filesystem::path nativePath = nativeDeletePath(path);
+                std::error_code removeError;
+                const bool removed = std::filesystem::remove(nativePath, removeError);
+                std::error_code existsError;
+                if (!removeError &&
+                    (removed || !std::filesystem::exists(nativePath, existsError)))
+                {
+                    return;
+                }
+
+                if (attempt + 1 < maxAttempts)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                    continue;
+                }
+
+                const std::string reason = removeError
+                    ? removeError.message()
+                    : "path still exists";
+                throw std::runtime_error(
+                    "Failed to delete \"" + toUtf8(path.wstring()) + "\": " + reason);
+            }
+        }
+
+        std::size_t pathDepth(const std::filesystem::path& path)
+        {
+            return static_cast<std::size_t>(
+                std::distance(path.begin(), path.end()));
+        }
+
+        void sortDirectoriesDeepestFirst(std::vector<std::filesystem::path>& directories)
+        {
+            std::sort(directories.begin(), directories.end(), [](const auto& left, const auto& right)
+            {
+                const std::size_t leftDepth = pathDepth(left);
+                const std::size_t rightDepth = pathDepth(right);
+                if (leftDepth != rightDepth)
+                {
+                    return leftDepth > rightDepth;
+                }
+
+                return left.wstring().size() > right.wstring().size();
+            });
+        }
+
+        void removeModFilesystemPath(const std::filesystem::path& modPath)
+        {
+            const std::filesystem::path nativeRoot = nativeDeletePath(modPath);
+            std::error_code statusError;
+            const std::filesystem::file_status rootStatus = std::filesystem::symlink_status(nativeRoot, statusError);
+            if (statusError || !std::filesystem::exists(rootStatus))
+            {
+                return;
+            }
+
+            const bool isRootDirectory = std::filesystem::is_directory(rootStatus) &&
+                !std::filesystem::is_symlink(rootStatus);
+            if (!isRootDirectory)
+            {
+                removePathWithRetry(nativeRoot);
+                return;
+            }
+
+            clearReadonlyAttribute(nativeRoot);
+
+            std::vector<std::filesystem::path> files;
+            std::vector<std::filesystem::path> directories;
+            std::error_code iterateError;
+            std::filesystem::recursive_directory_iterator iterator(
+                nativeRoot,
+                std::filesystem::directory_options::skip_permission_denied,
+                iterateError);
+            if (iterateError)
+            {
+                throw std::runtime_error("Failed to scan mod directory for deletion: " + iterateError.message());
+            }
+
+            const std::filesystem::recursive_directory_iterator end;
+            for (; iterator != end; iterator.increment(iterateError))
+            {
+                if (iterateError)
+                {
+                    throw std::runtime_error("Failed to scan mod directory for deletion: " + iterateError.message());
+                }
+
+                const std::filesystem::path current = iterator->path();
+                std::error_code entryError;
+                const std::filesystem::file_status status = iterator->symlink_status(entryError);
+                if (entryError)
+                {
+                    throw std::runtime_error("Failed to inspect mod item for deletion: " + entryError.message());
+                }
+
+                if (std::filesystem::is_directory(status) && !std::filesystem::is_symlink(status))
+                {
+                    directories.push_back(current);
+                }
+                else
+                {
+                    files.push_back(current);
+                }
+            }
+
+            for (const std::filesystem::path& file : files)
+            {
+                removePathWithRetry(file);
+            }
+
+            sortDirectoriesDeepestFirst(directories);
+            for (const std::filesystem::path& directory : directories)
+            {
+                removePathWithRetry(directory);
+            }
+
+            removePathWithRetry(nativeRoot);
         }
 
         ModFileSummary deferredFileSummary()
@@ -856,16 +1039,25 @@ namespace fluxora
             throw std::invalid_argument("Mod path is outside the project mods directory.");
         }
 
-        if (std::filesystem::is_directory(modPath))
+        try
         {
-            std::filesystem::remove_all(modPath);
+            removeModFilesystemPath(modPath);
         }
-        else
+        catch (const std::exception& exception)
         {
-            std::filesystem::remove(modPath);
+            logger_.write(
+                LogLevel::Warning,
+                "ModDelete",
+                "Failed to delete installed mod path=\"" + toUtf8(modPath.wstring()) +
+                    "\", error=\"" + exception.what() + "\"");
+            throw;
         }
 
         InstanceMetadataStore::deleteInstalledMod(projectDirectory, modPath);
+        logger_.write(
+            LogLevel::Info,
+            "ModDelete",
+            "Deleted installed mod path=\"" + toUtf8(modPath.wstring()) + "\"");
     }
 
     void ModService::setInstalledModEnabled(

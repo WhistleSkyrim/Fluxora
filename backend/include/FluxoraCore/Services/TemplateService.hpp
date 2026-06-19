@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
 #include "FluxoraCore/Services/IService.hpp"
 
 #include <optional>
@@ -22,7 +23,7 @@ namespace fluxora
         std::wstring description;
     };
 
-    // Optional script-extender metadata (SKSE for Skyrim, F4SE for Fallout 4, ...).
+    // Optional script-extender metadata supplied by the selected game definition.
     struct ScriptExtender
     {
         std::wstring name;
@@ -30,14 +31,16 @@ namespace fluxora
         std::wstring website;
     };
 
-    // A build template. The same structure represents the base template, every
-    // game template, and the resolved (base + game) result. Layering a game
-    // template over the base is what lets Fluxora support many games purely from
-    // data, without a per-game native plugin (.dll).
+    // Temporary compatibility projection serialized by the bridge for the
+    // current frontend. New core code should prefer typed GameDefinition and
+    // GameSupport rules; these fields stay until the C# model migrates.
     struct BuildTemplate
     {
         std::wstring id;
         std::wstring displayName;
+
+        // Deprecated bridge compatibility fields kept for the existing UI
+        // template shape.
         std::wstring gameName;
         std::wstring summary;
         std::wstring baseTemplateId;
@@ -78,6 +81,7 @@ namespace fluxora
         void registerBuiltInTemplates();
 
         Logger& logger_;
+        GameSupportRegistry gameSupport_;
         BuildTemplate base_;
         std::vector<BuildTemplate> games_;
         bool initialized_{false};

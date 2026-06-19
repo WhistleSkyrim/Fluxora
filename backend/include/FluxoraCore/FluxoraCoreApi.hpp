@@ -28,16 +28,25 @@ extern "C"
 
     FLUXORA_CORE_API int fluxora_core_is_available();
 
+    // Sets a thread-local operation id used by native bridge/core/operation log
+    // lines. Passing null or an empty string clears the current context.
+    FLUXORA_CORE_API int fluxora_set_operation_context(
+        const wchar_t* operationId);
+
     // Returns a JSON array describing the available game templates that can be
-    // layered on top of the base template:
-    //   [ { "id", "displayName", "gameName", "summary" }, ... ]
+    // layered on top of the base template. Deprecated compatibility fields remain
+    // in place while additive game-definition fields include uiTemplateId,
+    // gameCapabilities, archiveExtensions and requiredFiles:
+    //   [ { "id", "displayName", "gameName", "summary", ... }, ... ]
     FLUXORA_CORE_API int fluxora_get_game_templates(
         wchar_t* jsonBuffer,
         int jsonBufferLength);
 
     // Returns a JSON object with the fully resolved (base + game) template for a
-    // given template id: folders, profile files, base plugins, plugin
-    // extensions, executables, capabilities and the optional script extender.
+    // given template id. Deprecated compatibility fields remain in place while
+    // the frontend migrates; additive game-definition fields include
+    // uiTemplateId, gameCapabilities, archiveExtensions, requiredFiles,
+    // contentLayoutSummary, executableDisplayMetadata and launchTrackingMetadata.
     FLUXORA_CORE_API int fluxora_resolve_template(
         const wchar_t* templateId,
         wchar_t* jsonBuffer,
@@ -68,7 +77,9 @@ extern "C"
     // Opens an existing build from a Fluxora build config and returns a JSON
     // descriptor:
     //   { "id", "name", "gameName", "gamePath", "installRootDirectory",
-    //     "projectDirectory", "configPath", "template": { ...resolved... } }
+    //     "projectDirectory", "configPath", "template": { ...resolved... },
+    //     "gameCapabilities", "gameHealthSummary", "projectFingerprint",
+    //     "contentLayoutSummary", "uiTemplateId" }
     FLUXORA_CORE_API int fluxora_open_project_config(
         const wchar_t* configPath,
         wchar_t* jsonBuffer,
@@ -99,6 +110,33 @@ extern "C"
     FLUXORA_CORE_API int fluxora_save_build_path_settings(
         const wchar_t* configPath,
         const wchar_t* settingsJson,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // Writes a manifest-only FluxPack recipe. Source archives are referenced by
+    // provider/link/hash metadata; original archives are not embedded.
+    FLUXORA_CORE_API int fluxora_export_fluxpack(
+        const wchar_t* configPath,
+        const wchar_t* outputPath,
+        int includeGeneratedAssets,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // Reads a FluxPack recipe and returns a lightweight summary for the install
+    // flow.
+    FLUXORA_CORE_API int fluxora_inspect_fluxpack(
+        const wchar_t* fluxPackPath,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // Creates a Fluxora build from a FluxPack recipe, downloads installable
+    // source archives, applies embedded configs/profile order and returns:
+    //   { "configPath", "projectDirectory", "buildName", source counters, ... }
+    FLUXORA_CORE_API int fluxora_install_fluxpack(
+        const wchar_t* fluxPackPath,
+        const wchar_t* installRootDirectory,
+        FluxoraCoreProgressCallback progressCallback,
+        void* progressUserData,
         wchar_t* jsonBuffer,
         int jsonBufferLength);
 
@@ -320,6 +358,56 @@ extern "C"
         const wchar_t* projectDirectory,
         const wchar_t* downloadPath,
         const wchar_t* modName,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // existingModMode: 0 = fail if a mod with the same folder name exists,
+    // 1 = replace the existing mod folder, 2 = merge into it and overwrite
+    // files with the same relative path.
+    FLUXORA_CORE_API int fluxora_install_download_with_mode(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        const wchar_t* modName,
+        int existingModMode,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // Returns a JSON placement plan for a regular archive using the selected
+    // project's content layout rules. existingModMode has the same values as
+    // fluxora_install_download_with_mode.
+    FLUXORA_CORE_API int fluxora_analyze_download_content_layout(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        int existingModMode,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // Returns a JSON descriptor for an XML FOMOD installer in the archive, or
+    // { "isFomod": false } when the download is a regular archive.
+    FLUXORA_CORE_API int fluxora_analyze_fomod_download(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // selectedOptionIdsJson is a JSON string array of option ids returned by
+    // fluxora_analyze_fomod_download.
+    FLUXORA_CORE_API int fluxora_install_fomod_download_with_mode(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        const wchar_t* modName,
+        int existingModMode,
+        const wchar_t* selectedOptionIdsJson,
+        wchar_t* jsonBuffer,
+        int jsonBufferLength);
+
+    // Returns a JSON placement plan for selected FOMOD options without
+    // registering or installing a mod.
+    FLUXORA_CORE_API int fluxora_analyze_fomod_download_content_layout(
+        const wchar_t* projectDirectory,
+        const wchar_t* downloadPath,
+        int existingModMode,
+        const wchar_t* selectedOptionIdsJson,
         wchar_t* jsonBuffer,
         int jsonBufferLength);
 

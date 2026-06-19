@@ -1,11 +1,13 @@
 #pragma once
 
+#include "FluxoraCore/GameSupport/ProjectFingerprint.hpp"
 #include "FluxoraCore/Services/IService.hpp"
 #include "FluxoraCore/Services/TemplateService.hpp"
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +22,7 @@ namespace fluxora
         std::wstring templateId;
         std::filesystem::path gamePath;
         std::filesystem::path installRootDirectory;
+        bool validateGameDirectory{true};
     };
 
     struct ProjectDescriptor
@@ -31,6 +34,7 @@ namespace fluxora
         std::filesystem::path installRootDirectory;
         std::filesystem::path projectDirectory;
         std::filesystem::path configPath;
+        std::optional<ProjectFingerprint> fingerprint;
     };
 
     struct ProjectOpenResult

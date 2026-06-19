@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <PackageReference Include="SharpVectors.Wpf" Version="1.8.5" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -22,8 +23,8 @@
     <Resource Include="..\Icons\*.svg" LinkBase="Assets\Icons" />
     <Resource Include="..\installer\Fluxora.Installer\Assets\Emoji\*.svg" LinkBase="Assets\Emoji" />
     <Resource Include="Assets\Images\*.png" />
-    <!-- Embedded brand typefaces (Unbounded = display/headings, Onest = body/UI).
-         Both cover Latin + Cyrillic + German, so RU/EN/DE render in-brand.
+    <!-- Embedded brand typeface. Onest covers dense UI text and large titles
+         with Latin + Cyrillic + German glyphs, so RU/EN/DE render in-brand.
          Bundled as Resource so they render identically on every machine without install. -->
     <Resource Include="Fonts\*.ttf" />
     <None Include="Fonts\*-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />

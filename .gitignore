@@ -28,6 +28,14 @@ CMakeUserPresets.json
 
 # Logs
 *.log
+logs/
+
+# Temporary local workspaces
+tmp/
+
+# Local agent skill bundles
+.agents/skills/
+skills-lock.json
 
 # OS
 Thumbs.db

@@ -18,6 +18,7 @@ namespace fluxora
         std::wstring expiresAtUtc;
         std::wstring protectedAccessToken;
         std::wstring protectedRefreshToken;
+        std::wstring protectedApiKey;
     };
 
     class AppSettingsService final : public IService

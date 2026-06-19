@@ -1,11 +1,18 @@
 #include "FluxoraCore/Services/ModOrganizerImportService.hpp"
 
+#include "FluxoraCore/GameSupport/GameDetectionService.hpp"
+#include "FluxoraCore/GameSupport/GameHealthCheckService.hpp"
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
+#include "FluxoraCore/GameSupport/ProjectFingerprint.hpp"
 #include "FluxoraCore/Services/BuildPathSettingsService.hpp"
 #include "FluxoraCore/Services/BulkFileCopyService.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
 #include "FluxoraCore/Services/ModOrganizerExecutableImportService.hpp"
 #include "FluxoraCore/Services/ModOrganizerPluginGroupService.hpp"
 #include "FluxoraCore/Services/ModOrganizerProfileOrderService.hpp"
+#include "FluxoraCore/Services/PathSafetyService.hpp"
+#include "FluxoraCore/Storage/AtomicFileStore.hpp"
+#include "FluxoraCore/Storage/ProjectStateTransaction.hpp"
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
@@ -68,6 +75,7 @@ namespace fluxora
             ModOrganizerImportAnalysis analysis;
             ModOrganizerSourceLayout sourceLayout;
             BuildTemplate resolvedTemplate;
+            ProjectFingerprint fingerprint;
             std::vector<ImportedModPlan> mods;
             std::vector<ProfileOrderImportItemRecord> orderItems;
             std::vector<ProfilePluginOrderImportItemRecord> pluginOrderItems;
@@ -137,6 +145,28 @@ namespace fluxora
             return toLower(std::wstring(left)) == toLower(std::wstring(right));
         }
 
+        bool containsIgnoreCase(std::wstring_view value, std::wstring_view needle)
+        {
+            if (needle.empty())
+            {
+                return true;
+            }
+            if (value.size() < needle.size())
+            {
+                return false;
+            }
+
+            for (std::size_t index = 0; index + needle.size() <= value.size(); ++index)
+            {
+                if (equalsIgnoreCase(value.substr(index, needle.size()), needle))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         bool endsWithIgnoreCase(std::wstring_view value, std::wstring_view suffix)
         {
             if (value.size() < suffix.size())
@@ -165,19 +195,91 @@ namespace fluxora
             return value;
         }
 
-        void replaceAll(std::wstring& value, std::wstring_view token, std::wstring_view replacement)
+        std::string toUtf8(const std::wstring& value);
+        std::wstring fromBytes(const std::string& value);
+
+        void appendWideCharacterAsBytes(std::string& bytes, wchar_t character)
         {
-            if (token.empty())
+            if (character <= 0xFF)
             {
+                bytes.push_back(static_cast<char>(character));
                 return;
             }
 
-            std::size_t position = 0;
-            while ((position = value.find(token, position)) != std::wstring::npos)
+            bytes += toUtf8(std::wstring(1, character));
+        }
+
+        int hexDigit(wchar_t character)
+        {
+            if (character >= L'0' && character <= L'9')
             {
-                value.replace(position, token.size(), replacement);
-                position += replacement.size();
+                return static_cast<int>(character - L'0');
             }
+            if (character >= L'a' && character <= L'f')
+            {
+                return static_cast<int>(character - L'a' + 10);
+            }
+            if (character >= L'A' && character <= L'F')
+            {
+                return static_cast<int>(character - L'A' + 10);
+            }
+
+            return -1;
+        }
+
+        std::wstring decodeQtByteArrayPayload(const std::wstring& payload)
+        {
+            std::string bytes;
+            bytes.reserve(payload.size());
+
+            for (std::size_t index = 0; index < payload.size(); ++index)
+            {
+                const wchar_t character = payload[index];
+                if (character != L'\\' || index + 1 >= payload.size())
+                {
+                    appendWideCharacterAsBytes(bytes, character);
+                    continue;
+                }
+
+                const wchar_t escaped = payload[++index];
+                switch (escaped)
+                {
+                case L'n':
+                    bytes.push_back('\n');
+                    break;
+                case L'r':
+                    bytes.push_back('\r');
+                    break;
+                case L't':
+                    bytes.push_back('\t');
+                    break;
+                case L'\\':
+                    bytes.push_back('\\');
+                    break;
+                case L'x':
+                {
+                    if (index + 2 < payload.size())
+                    {
+                        const int high = hexDigit(payload[index + 1]);
+                        const int low = hexDigit(payload[index + 2]);
+                        if (high >= 0 && low >= 0)
+                        {
+                            bytes.push_back(static_cast<char>((high << 4) | low));
+                            index += 2;
+                            break;
+                        }
+                    }
+
+                    bytes.push_back('x');
+                    break;
+                }
+                default:
+                    appendWideCharacterAsBytes(bytes, escaped);
+                    break;
+                }
+            }
+
+            return fromBytes(bytes);
         }
 
         std::wstring decodeQtIniValue(std::wstring value)
@@ -187,8 +289,7 @@ namespace fluxora
                 equalsIgnoreCase(value.substr(0, 11), L"@ByteArray(") &&
                 value.back() == L')')
             {
-                value = value.substr(11, value.size() - 12);
-                replaceAll(value, L"\\\\", L"\\");
+                return decodeQtByteArrayPayload(value.substr(11, value.size() - 12));
             }
 
             return value;
@@ -405,20 +506,19 @@ namespace fluxora
                 std::istreambuf_iterator<char>());
         }
 
-        void writeTextFile(const std::filesystem::path& path, const std::string& content)
+        void writeStateFile(
+            const std::filesystem::path& path,
+            const std::string& content,
+            std::wstring stateName,
+            ProjectStateValidation validation = ProjectStateValidation::Utf8Text)
         {
-            if (!path.parent_path().empty())
-            {
-                std::filesystem::create_directories(path.parent_path());
-            }
-
-            std::ofstream file(path, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!file)
-            {
-                throw std::runtime_error("Failed to write import file.");
-            }
-
-            file.write(content.data(), static_cast<std::streamsize>(content.size()));
+            AtomicFileStore().writeTextFile(
+                path,
+                content,
+                AtomicFileWriteOptions{
+                    std::move(stateName),
+                    validation
+                });
         }
 
         std::map<std::wstring, std::wstring> readIni(const std::filesystem::path& path)
@@ -496,6 +596,52 @@ namespace fluxora
             }
 
             return {};
+        }
+
+        std::wstring normalizeMetaIdentifier(std::wstring value)
+        {
+            value = trim(std::move(value));
+            return value == L"0" ? std::wstring() : value;
+        }
+
+        std::wstring installedFileIdFromMeta(
+            const std::map<std::wstring, std::wstring>& values,
+            const std::wstring& modId)
+        {
+            constexpr std::wstring_view sectionPrefix = L"installedfiles.";
+            constexpr std::wstring_view fileIdSuffix = L"\\fileid";
+
+            std::wstring fallback;
+            for (const auto& [key, value] : values)
+            {
+                if (!startsWith(key, sectionPrefix) || !key.ends_with(fileIdSuffix))
+                {
+                    continue;
+                }
+
+                const std::wstring fileId = normalizeMetaIdentifier(value);
+                if (fileId.empty())
+                {
+                    continue;
+                }
+
+                if (fallback.empty())
+                {
+                    fallback = fileId;
+                }
+
+                const std::wstring entryPrefix = key.substr(0, key.size() - fileIdSuffix.size());
+                const auto modIdEntry = values.find(entryPrefix + L"\\modid");
+                const std::wstring installedModId = modIdEntry == values.end()
+                    ? std::wstring()
+                    : normalizeMetaIdentifier(modIdEntry->second);
+                if (modId.empty() || installedModId.empty() || equalsIgnoreCase(installedModId, modId))
+                {
+                    return fileId;
+                }
+            }
+
+            return fallback;
         }
 
         bool isSeparatorName(std::wstring_view name)
@@ -720,6 +866,30 @@ namespace fluxora
         {
             const std::string logPath = diagnostics.logPathText();
             return logPath.empty() ? std::string{} : " diagnosticsLog=\"" + logPath + "\"";
+        }
+
+        void logImportPlanDiagnostics(Logger& logger, const ImportPlan& plan, std::string_view phase)
+        {
+            logger.writeOperation(
+                plan.analysis.canImport ? LogLevel::Info : LogLevel::Warning,
+                "MO2Import",
+                std::string(phase) +
+                    " importProject selectedGameId=\"" + toUtf8(plan.fingerprint.gameId) + "\"" +
+                    ", definitionVersion=\"" + toUtf8(plan.fingerprint.gameDefinitionVersion) + "\"" +
+                    ", detectionSource=\"" + toUtf8(plan.fingerprint.detectionSource) + "\"" +
+                    ", detectionConfidence=\"" + toUtf8(plan.fingerprint.detectionConfidence) + "\"" +
+                    ", healthResult=\"" + toUtf8(plan.fingerprint.healthStatusAtCreation) + "\"" +
+                    ", versionResult=\"" +
+                    (plan.fingerprint.gameVersion.empty()
+                        ? std::string("unavailable")
+                        : toUtf8(plan.fingerprint.gameVersion)) + "\"" +
+                    ", sourceDirectory=\"" + pathForLog(plan.analysis.sourceDirectory) + "\"" +
+                    ", destinationRoot=\"" + pathForLog(plan.analysis.destinationRootDirectory) + "\"" +
+                    ", targetProjectDirectory=\"" + pathForLog(plan.analysis.targetProjectDirectory) + "\"" +
+                    ", modCount=" + std::to_string(plan.analysis.modCount) +
+                    ", canImport=" + std::to_string(plan.analysis.canImport ? 1 : 0) +
+                    ", status=\"" + toUtf8(plan.analysis.statusMessage) + "\"" +
+                    ", warning=\"" + toUtf8(plan.analysis.warningMessage) + "\".");
         }
 
         bool isSameOrInside(
@@ -992,7 +1162,7 @@ namespace fluxora
             const std::filesystem::path& baseDirectory,
             const std::filesystem::path& gamePath)
         {
-            value = stripQuotes(std::move(value));
+            value = decodeQtIniValue(std::move(value));
             if (value.empty())
             {
                 return {};
@@ -1133,24 +1303,49 @@ namespace fluxora
             };
         }
 
+        bool isDirectory(const std::filesystem::path& path);
+        bool hasProfileMarker(const std::filesystem::path& profileDirectory);
+
         std::wstring defaultProfileFromProfilesDirectory(const std::filesystem::path& profilesDirectory)
         {
             const auto defaultProfile = profilesDirectory / std::filesystem::path(fallbackProfileName);
-            if (std::filesystem::exists(defaultProfile) && std::filesystem::is_directory(defaultProfile))
+            if (isDirectory(defaultProfile) && hasProfileMarker(defaultProfile))
             {
                 return std::wstring(fallbackProfileName);
             }
 
+            std::wstring firstProfile;
             std::error_code error;
             for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(profilesDirectory, error))
             {
-                if (!error && entry.is_directory(error))
+                if (error)
                 {
-                    return entry.path().filename().wstring();
+                    break;
+                }
+
+                if (!entry.is_directory(error))
+                {
+                    continue;
+                }
+
+                if (!hasProfileMarker(entry.path()))
+                {
+                    continue;
+                }
+
+                const std::wstring profileName = entry.path().filename().wstring();
+                if (firstProfile.empty())
+                {
+                    firstProfile = profileName;
+                }
+
+                if (equalsIgnoreCase(profileName, fallbackProfileName))
+                {
+                    return profileName;
                 }
             }
 
-            return std::wstring(fallbackProfileName);
+            return firstProfile.empty() ? std::wstring(fallbackProfileName) : firstProfile;
         }
 
         std::wstring profileFromSourceLayout(
@@ -1167,12 +1362,12 @@ namespace fluxora
                     L"profile",
                     L"settings.profile"
                 });
-            selectedProfile = trimFolderName(std::move(selectedProfile));
+            selectedProfile = trimFolderName(decodeQtIniValue(std::move(selectedProfile)));
             if (!selectedProfile.empty())
             {
                 const std::filesystem::path profileDirectory =
                     layout.profilesDirectory / std::filesystem::path(selectedProfile);
-                if (std::filesystem::exists(profileDirectory) && std::filesystem::is_directory(profileDirectory))
+                if (isDirectory(profileDirectory) && hasProfileMarker(profileDirectory))
                 {
                     return selectedProfile;
                 }
@@ -1356,28 +1551,8 @@ namespace fluxora
 
         bool isKnownGameExecutableName(std::wstring_view fileName)
         {
-            static constexpr std::array<std::wstring_view, 10> knownGameExecutables{
-                L"SkyrimSE.exe",
-                L"Skyrim SE.exe",
-                L"SkyrimSELauncher.exe",
-                L"SkyrimVR.exe",
-                L"SkyrimVRLauncher.exe",
-                L"TESV.exe",
-                L"SkyrimLauncher.exe",
-                L"Fallout4.exe",
-                L"Fallout4Launcher.exe",
-                L"Starfield.exe"
-            };
-
-            for (std::wstring_view executable : knownGameExecutables)
-            {
-                if (equalsIgnoreCase(fileName, executable))
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            return registry.lookupByExecutableName(fileName).supported;
         }
 
         bool isLikelyGameDirectory(const std::filesystem::path& path)
@@ -1387,28 +1562,18 @@ namespace fluxora
                 return false;
             }
 
-            static constexpr std::array<std::wstring_view, 10> knownGameExecutables{
-                L"SkyrimSE.exe",
-                L"Skyrim SE.exe",
-                L"SkyrimSELauncher.exe",
-                L"SkyrimVR.exe",
-                L"SkyrimVRLauncher.exe",
-                L"TESV.exe",
-                L"SkyrimLauncher.exe",
-                L"Fallout4.exe",
-                L"Fallout4Launcher.exe",
-                L"Starfield.exe"
-            };
-
-            for (std::wstring_view executable : knownGameExecutables)
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            GameDetectionService detectionService(registry);
+            GameDetectionRequest request;
+            request.installPath = path;
+            const GameDetectionResult detection = detectionService.detect(request);
+            if (!detection.detected)
             {
-                if (isRegularFile(path / std::filesystem::path(executable)))
-                {
-                    return true;
-                }
+                return false;
             }
 
-            return isDirectory(path / L"Data");
+            const GameHealthCheckResult health = GameHealthCheckService().check(detection);
+            return health.allowsAutomation();
         }
 
         std::optional<std::filesystem::path> likelyGameDirectoryFromCandidate(
@@ -1550,19 +1715,33 @@ namespace fluxora
         std::optional<std::filesystem::path> localGameDirectoryFromSource(
             const std::filesystem::path& sourceDirectory)
         {
-            static constexpr std::array<std::wstring_view, 9> preferredFolderNames{
+            std::vector<std::wstring> preferredFolderNames{
                 L"stock game",
                 L"Stock Game",
                 L"stock_game",
                 L"game",
-                L"Game",
-                L"Skyrim Special Edition",
-                L"SkyrimSE",
-                L"Skyrim SE",
-                L"Skyrim"
+                L"Game"
             };
 
-            for (std::wstring_view folderName : preferredFolderNames)
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            for (const GameDefinition& definition : registry.definitions())
+            {
+                for (const std::wstring& folderName : definition.installFolderAliases)
+                {
+                    if (std::find_if(
+                            preferredFolderNames.begin(),
+                            preferredFolderNames.end(),
+                            [&folderName](const std::wstring& existing)
+                            {
+                                return equalsIgnoreCase(existing, folderName);
+                            }) == preferredFolderNames.end())
+                    {
+                        preferredFolderNames.push_back(folderName);
+                    }
+                }
+            }
+
+            for (const std::wstring& folderName : preferredFolderNames)
             {
                 if (const auto gameDirectory =
                     likelyGameDirectoryFromCandidate(sourceDirectory / std::filesystem::path(folderName)))
@@ -1609,39 +1788,50 @@ namespace fluxora
             const TemplateService& templates,
             const std::map<std::wstring, std::wstring>& organizerIni,
             const std::vector<std::wstring>& modFolders,
-            const std::filesystem::path& modsDirectory)
+            const std::filesystem::path& modsDirectory,
+            const std::filesystem::path& gamePath)
         {
-            std::wstring detectedGame = iniValue(
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+
+            GameDetectionRequest request;
+            request.installPath = gamePath;
+
+            const std::wstring detectedGame = iniValue(
                 organizerIni,
                 {L"gameName", L"General.gameName", L"game", L"General.game"});
+            if (!detectedGame.empty())
+            {
+                request.nameHints.push_back(detectedGame);
+            }
 
             for (const std::wstring& folder : modFolders)
             {
                 const auto meta = readIni(modsDirectory / std::filesystem::path(folder) / L"meta.ini");
-                if (detectedGame.empty())
+                const std::wstring metaGame = iniValue(meta, {L"gameName", L"General.gameName", L"game"});
+                if (!metaGame.empty())
                 {
-                    detectedGame = iniValue(meta, {L"gameName", L"General.gameName", L"game"});
+                    request.nameHints.push_back(metaGame);
                 }
+
                 const std::wstring domain = iniValue(meta, {L"gameDomain", L"nexusDomain"});
-                if (equalsIgnoreCase(domain, L"skyrimspecialedition"))
+                if (!domain.empty())
                 {
-                    return templates.resolve(L"skyrimse");
+                    request.domainHints.push_back(domain);
                 }
             }
 
-            if (detectedGame.find(L"Skyrim Special Edition") != std::wstring::npos ||
-                detectedGame.find(L"SkyrimSE") != std::wstring::npos)
+            GameDetectionService detectionService(registry);
+            const GameDetectionResult detection = detectionService.detect(request);
+            if (detection.detected)
             {
-                return templates.resolve(L"skyrimse");
+                return templates.resolve(detection.gameId.value());
+            }
+            if (detection.source == DetectionSource::Ambiguous)
+            {
+                throw std::invalid_argument("The Mod Organizer game detection is ambiguous.");
             }
 
-            const auto& gameTemplates = templates.gameTemplates();
-            if (gameTemplates.empty())
-            {
-                throw std::invalid_argument("No Fluxora game templates are available.");
-            }
-
-            return templates.resolve(gameTemplates.front().id);
+            throw std::invalid_argument("The Mod Organizer game is not supported by Fluxora.");
         }
 
         std::filesystem::path chooseGamePath(
@@ -1747,11 +1937,32 @@ namespace fluxora
                     : analysis.targetProjectDirectory);
             analysis.hasEnoughSpace = analysis.availableBytes >= analysis.totalBytes;
 
+            const PathSafetyService safety;
+            const PathSafetyResult destinationSafety = safety.validateDirectoryWriteRoot(
+                analysis.destinationRootDirectory,
+                PathSafetyWriteOptions{analysis.totalBytes, false});
+            const PathSafetyResult targetSafety = analysis.targetProjectDirectory.empty()
+                ? destinationSafety
+                : safety.validateWritePath(
+                    analysis.destinationRootDirectory,
+                    analysis.targetProjectDirectory,
+                    PathSafetyWriteOptions{analysis.totalBytes, false});
+            const bool hasUnsafeDestination = !destinationSafety.safe() || !targetSafety.safe();
+            if (destinationSafety.availableBytes > 0)
+            {
+                analysis.availableBytes = destinationSafety.availableBytes;
+                analysis.hasEnoughSpace = analysis.availableBytes >= analysis.totalBytes;
+            }
+
             const bool hasSourceTargetOverlap = hasUnsafeSourceTargetOverlap(
                 analysis.sourceDirectory,
                 analysis.targetProjectDirectory);
 
-            if (hasSourceTargetOverlap)
+            if (hasUnsafeDestination)
+            {
+                analysis.statusMessage = L"Невозможно перенести сборку: папка назначения небезопасна.";
+            }
+            else if (hasSourceTargetOverlap)
             {
                 analysis.statusMessage =
                     L"Невозможно перенести сборку: источник и папка назначения совпадают или вложены друг в друга.";
@@ -1769,7 +1980,12 @@ namespace fluxora
                 analysis.statusMessage = L"Сборка готова к переносу.";
             }
 
-            if (hasSourceTargetOverlap)
+            if (hasUnsafeDestination)
+            {
+                analysis.warningMessage =
+                    L"Выберите обычную пользовательскую папку. Системные папки и небезопасные пути заблокированы.";
+            }
+            else if (hasSourceTargetOverlap)
             {
                 analysis.warningMessage =
                     L"Выберите отдельную папку назначения. Fluxora не очищает и не изменяет исходную сборку.";
@@ -1780,8 +1996,27 @@ namespace fluxora
                     L"Текущая сборка Fluxora будет заменена копией из Mod Organizer 2.";
             }
 
-            analysis.canImport = !hasSourceTargetOverlap && analysis.hasEnoughSpace && analysis.modCount > 0;
+            analysis.canImport =
+                !hasUnsafeDestination && !hasSourceTargetOverlap && analysis.hasEnoughSpace && analysis.modCount > 0;
             return analysis;
+        }
+
+        std::wstring blockingHealthMessage(const GameHealthCheckResult& health)
+        {
+            std::wstring message = health.summary.empty()
+                ? L"Проверка игры не пройдена."
+                : health.summary;
+            for (const GameHealthFinding& finding : health.findings)
+            {
+                if (finding.severity == HealthSeverity::Blocker || finding.critical)
+                {
+                    message += L" ";
+                    message += finding.message;
+                    break;
+                }
+            }
+
+            return message;
         }
 
         ImportPlan createPlan(
@@ -1847,7 +2082,7 @@ namespace fluxora
                 }
             }
 
-            BuildTemplate resolved = chooseTemplate(templates, organizerIni, modFolders, modsDirectory);
+            BuildTemplate resolved = chooseTemplate(templates, organizerIni, modFolders, modsDirectory, gamePath);
             if (!profileName.empty())
             {
                 resolved.defaultProfileName = profileName;
@@ -1890,6 +2125,7 @@ namespace fluxora
                 sourceLayout,
                 analysis.targetProjectDirectory,
                 executableImport);
+            const std::filesystem::path healthGamePath = analysis.gamePath;
             analysis.gamePath = remapImportedGamePath(
                 analysis.gamePath,
                 sourceLayout,
@@ -1903,7 +2139,30 @@ namespace fluxora
                 const bool hasSourceTargetOverlap = hasUnsafeSourceTargetOverlap(
                     analysis.sourceDirectory,
                     analysis.targetProjectDirectory);
-                if (!hasSourceTargetOverlap && !analysis.hasEnoughSpace)
+                const PathSafetyService safety;
+                const PathSafetyResult destinationSafety = safety.validateDirectoryWriteRoot(
+                    analysis.destinationRootDirectory,
+                    PathSafetyWriteOptions{analysis.totalBytes, false});
+                const PathSafetyResult targetSafety = analysis.targetProjectDirectory.empty()
+                    ? destinationSafety
+                    : safety.validateWritePath(
+                        analysis.destinationRootDirectory,
+                        analysis.targetProjectDirectory,
+                        PathSafetyWriteOptions{analysis.totalBytes, false});
+                const bool hasUnsafeDestination = !destinationSafety.safe() || !targetSafety.safe();
+                if (destinationSafety.availableBytes > 0)
+                {
+                    analysis.availableBytes = destinationSafety.availableBytes;
+                    analysis.hasEnoughSpace = analysis.availableBytes >= analysis.totalBytes;
+                }
+
+                if (hasUnsafeDestination)
+                {
+                    analysis.statusMessage = L"Невозможно перенести сборку: папка назначения небезопасна.";
+                    analysis.warningMessage =
+                        L"Выберите обычную пользовательскую папку. Системные папки и небезопасные пути заблокированы.";
+                }
+                else if (!hasSourceTargetOverlap && !analysis.hasEnoughSpace)
                 {
                     analysis.statusMessage = L"На выбранном диске недостаточно места.";
                 }
@@ -1913,8 +2172,44 @@ namespace fluxora
                 }
 
                 analysis.canImport =
-                    !hasSourceTargetOverlap && analysis.hasEnoughSpace && analysis.modCount > 0;
+                    !hasUnsafeDestination && !hasSourceTargetOverlap && analysis.hasEnoughSpace && analysis.modCount > 0;
             }
+
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            GameDetectionService detectionService(registry);
+            GameDetectionRequest detectionRequest;
+            detectionRequest.manualGameId = GameId::parseOrThrow(resolved.id);
+            detectionRequest.installPath = healthGamePath;
+            const GameDetectionResult detection = detectionService.detect(detectionRequest);
+            const GameHealthCheckResult health = GameHealthCheckService().check(detection);
+            if (!health.allowsAutomation())
+            {
+                analysis.canImport = false;
+                analysis.statusMessage =
+                    std::wstring(L"Невозможно импортировать сборку: ") + blockingHealthMessage(health);
+                analysis.warningMessage =
+                    L"Выберите корректную папку установленной игры и повторите импорт.";
+            }
+            else if (health.status == HealthStatus::Warning && analysis.warningMessage.empty())
+            {
+                analysis.warningMessage = health.summary;
+            }
+
+            std::optional<std::filesystem::path> selectedExecutable;
+            if (!detection.selectedExecutable.empty())
+            {
+                selectedExecutable = detection.selectedExecutable;
+            }
+            GameDetectionRequest fingerprintDetectionRequest;
+            fingerprintDetectionRequest.manualGameId = GameId::parseOrThrow(resolved.id);
+            fingerprintDetectionRequest.installPath = analysis.gamePath;
+            const GameDetectionResult fingerprintDetection =
+                detectionService.detect(fingerprintDetectionRequest);
+            const ProjectFingerprint fingerprint = createProjectFingerprint(
+                fingerprintDetection.detected ? fingerprintDetection : detection,
+                health,
+                analysis.gamePath,
+                selectedExecutable);
 
             std::vector<ImportedModPlan> mods;
             mods.reserve(modFolders.size());
@@ -1931,6 +2226,7 @@ namespace fluxora
                 analysis,
                 std::move(sourceLayout),
                 std::move(resolved),
+                fingerprint,
                 std::move(mods),
                 std::move(orderItems),
                 std::move(pluginOrderItems),
@@ -1940,7 +2236,8 @@ namespace fluxora
 
         void materializeTemplate(
             const std::filesystem::path& projectDirectory,
-            const BuildTemplate& resolved)
+            const BuildTemplate& resolved,
+            Logger* logger)
         {
             std::filesystem::create_directories(projectDirectory);
             for (const std::wstring& folder : resolved.folders)
@@ -1953,6 +2250,13 @@ namespace fluxora
                 : resolved.defaultProfileName;
             const auto profileDirectory = projectDirectory / L"profiles" / std::filesystem::path(profileName);
             std::filesystem::create_directories(profileDirectory);
+
+            AtomicFileStore fileStore;
+            ProjectStateTransaction transaction(
+                fileStore,
+                profileDirectory,
+                L"mo2 import profile seed",
+                logger);
 
             for (const std::wstring& profileFile : resolved.profileFiles)
             {
@@ -1979,8 +2283,18 @@ namespace fluxora
                     }
                 }
 
-                writeTextFile(profileFilePath, content);
+                transaction.trackFile(
+                    profileFilePath,
+                    L"profile state file",
+                    ProjectStateValidation::Utf8Text);
+                writeStateFile(
+                    profileFilePath,
+                    content,
+                    L"profile state file",
+                    ProjectStateValidation::Utf8Text);
             }
+
+            transaction.commit();
         }
 
         void writeLaunchExecutable(JsonWriter& writer, const GameExecutable& executable)
@@ -1997,7 +2311,8 @@ namespace fluxora
         void writeBuildManifest(
             const ProjectDescriptor& project,
             const BuildTemplate& resolved,
-            const std::vector<GameExecutable>& launchExecutables)
+            const std::vector<GameExecutable>& launchExecutables,
+            const ProjectFingerprint& fingerprint)
         {
             JsonWriter writer;
             writer.beginObject();
@@ -2006,13 +2321,15 @@ namespace fluxora
             writer.field(L"templateId", resolved.id);
             writer.field(L"baseTemplateId", resolved.baseTemplateId);
             writer.field(L"gameName", resolved.gameName);
+            writer.field(L"gameId", fingerprint.gameId);
+            writer.field(L"gameDisplayName", fingerprint.gameDisplayName);
             writer.field(L"gamePath", project.gamePath.wstring());
             writer.field(L"installRoot", project.installRootDirectory.wstring());
             writer.field(L"projectDirectory", project.projectDirectory.wstring());
             writer.field(L"configPath", project.configPath.wstring());
             writer.field(L"dataDirectory", resolved.dataDirectory);
             writer.field(L"nexusDomain", resolved.nexusDomain);
-            writer.field(L"defaultProfile", project.name.empty() ? resolved.defaultProfileName : resolved.defaultProfileName);
+            writer.field(L"defaultProfile", resolved.defaultProfileName);
             writer.stringArray(L"folders", resolved.folders);
             writer.stringArray(L"profileFiles", resolved.profileFiles);
             writer.stringArray(L"basePlugins", resolved.basePlugins);
@@ -2050,9 +2367,15 @@ namespace fluxora
             {
                 writer.key(L"scriptExtender").nullValue();
             }
+            writer.key(L"projectFingerprint");
+            writeProjectFingerprint(writer, fingerprint);
             writer.endObject();
 
-            writeTextFile(project.configPath, toUtf8(writer.str()));
+            writeStateFile(
+                project.configPath,
+                toUtf8(writer.str()),
+                L"project manifest",
+                ProjectStateValidation::JsonObject);
         }
 
         bool isTransientFilesystemError(const std::error_code& error)
@@ -2395,17 +2718,30 @@ namespace fluxora
             const std::map<std::wstring, std::wstring>& meta,
             const BuildTemplate& resolvedTemplate)
         {
-            const std::wstring modId = iniValue(meta, {L"modid", L"General.modid"});
-            const std::wstring fileId = iniValue(meta, {L"fileid", L"General.fileid"});
-            const std::wstring url = iniValue(meta, {L"url", L"General.url"});
+            const std::wstring rawModId = iniValue(meta, {L"modid", L"General.modid"});
+            const std::wstring rawFileId = iniValue(meta, {L"fileid", L"General.fileid"});
+            const std::wstring modId = normalizeMetaIdentifier(rawModId);
+            std::wstring fileId = normalizeMetaIdentifier(rawFileId);
+            if (fileId.empty())
+            {
+                fileId = installedFileIdFromMeta(meta, modId);
+            }
+            std::wstring url = iniValue(meta, {L"url", L"General.url"});
             const std::wstring newestVersion = iniValue(meta, {L"newestVersion", L"General.newestVersion"});
 
+            if (url.empty() && !resolvedTemplate.nexusDomain.empty() && !modId.empty())
+            {
+                url = fileId.empty()
+                    ? L"https://www.nexusmods.com/" + resolvedTemplate.nexusDomain + L"/mods/" + modId
+                    : L"nxm://" + resolvedTemplate.nexusDomain + L"/mods/" + modId + L"/files/" + fileId;
+            }
+
             ModSourceRecord source;
-            source.provider = (!modId.empty() && modId != L"0") || !fileId.empty() || !url.empty()
+            source.provider = !modId.empty() || !fileId.empty() || !url.empty()
                 ? L"nexus"
                 : L"local";
             source.gameDomain = resolvedTemplate.nexusDomain;
-            source.remoteModId = modId == L"0" ? std::wstring() : modId;
+            source.remoteModId = modId;
             source.remoteFileId = fileId;
             source.url = url;
             source.latestVersion = newestVersion;
@@ -2434,7 +2770,8 @@ namespace fluxora
                 plan.analysis.gamePath,
                 plan.analysis.destinationRootDirectory,
                 plan.analysis.targetProjectDirectory,
-                plan.analysis.targetConfigPath
+                plan.analysis.targetConfigPath,
+                std::optional<ProjectFingerprint>{plan.fingerprint}
             };
         }
     }
@@ -2484,6 +2821,7 @@ namespace fluxora
             sourceDirectory,
             destinationRootDirectory,
             existingConfigPath);
+        logImportPlanDiagnostics(logger_, plan, "analyze");
         return plan.analysis;
     }
 
@@ -2491,20 +2829,47 @@ namespace fluxora
         const ModOrganizerImportRequest& request) const
     {
         const bool replaceExisting = request.mode == ModOrganizerImportMode::ReplaceExisting;
-        ImportPlan plan = createPlan(
-            templates_,
-            projects_,
-            request.sourceDirectory,
-            request.destinationRootDirectory,
-            replaceExisting ? request.existingConfigPath : std::filesystem::path{});
+        ImportPlan plan;
+        try
+        {
+            plan = createPlan(
+                templates_,
+                projects_,
+                request.sourceDirectory,
+                request.destinationRootDirectory,
+                replaceExisting ? request.existingConfigPath : std::filesystem::path{});
+        }
+        catch (const std::exception& exception)
+        {
+            logger_.writeOperation(
+                LogLevel::Error,
+                "MO2Import",
+                std::string("importProject blocked sourceDirectory=\"") +
+                    pathForLog(request.sourceDirectory) +
+                    "\", destinationRoot=\"" + pathForLog(request.destinationRootDirectory) +
+                    "\", reason=\"" + exception.what() + "\".");
+            throw;
+        }
+        logImportPlanDiagnostics(logger_, plan, "planned");
 
         if (hasUnsafeSourceTargetOverlap(plan.analysis.sourceDirectory, plan.analysis.targetProjectDirectory))
         {
+            logger_.writeOperation(
+                LogLevel::Error,
+                "MO2Import",
+                "importProject blocked reason=\"Source and destination directories must be separate.\".");
             throw std::invalid_argument("Source and destination directories must be separate.");
         }
 
         if (!plan.analysis.canImport)
         {
+            logger_.writeOperation(
+                LogLevel::Error,
+                "MO2Import",
+                "importProject blocked selectedGameId=\"" + toUtf8(plan.fingerprint.gameId) +
+                    "\", healthResult=\"" + toUtf8(plan.fingerprint.healthStatusAtCreation) +
+                    "\", status=\"" + toUtf8(plan.analysis.statusMessage) +
+                    "\", warning=\"" + toUtf8(plan.analysis.warningMessage) + "\".");
             throw std::invalid_argument("Mod Organizer 2 instance cannot be imported with the current settings.");
         }
 
@@ -2542,6 +2907,18 @@ namespace fluxora
                     pathForLog(finalProjectDirectory) + "\", staging=\"" +
                     pathForLog(stagingProjectDirectory) + "\"" +
                     importDiagnosticsSuffix(diagnostics));
+            logger_.writeOperation(
+                LogLevel::Info,
+                "MO2Import",
+                "importProject started selectedGameId=\"" + toUtf8(plan.fingerprint.gameId) +
+                    "\", definitionVersion=\"" + toUtf8(plan.fingerprint.gameDefinitionVersion) +
+                    "\", detectionSource=\"" + toUtf8(plan.fingerprint.detectionSource) +
+                    "\", detectionConfidence=\"" + toUtf8(plan.fingerprint.detectionConfidence) +
+                    "\", healthResult=\"" + toUtf8(plan.fingerprint.healthStatusAtCreation) +
+                    "\", sourceDirectory=\"" + pathForLog(plan.analysis.sourceDirectory) +
+                    "\", destination=\"" + pathForLog(finalProjectDirectory) +
+                    "\", staging=\"" + pathForLog(stagingProjectDirectory) + "\"" +
+                    importDiagnosticsSuffix(diagnostics) + ".");
 
             if (request.progress)
             {
@@ -2665,7 +3042,7 @@ namespace fluxora
                 });
             }
 
-            materializeTemplate(stagingProjectDirectory, plan.resolvedTemplate);
+            materializeTemplate(stagingProjectDirectory, plan.resolvedTemplate, &logger_);
 
             if (request.progress)
             {
@@ -2698,10 +3075,14 @@ namespace fluxora
                     nameFromMeta(meta, mod.folderName),
                     versionFromMeta(meta),
                     mod.isEnabled,
-                    sourceRecordFromMeta(meta, plan.resolvedTemplate)
+                    sourceRecordFromMeta(meta, plan.resolvedTemplate),
+                    false
                 });
             }
 
+            diagnostics.write(
+                "mod-organizer-import-register-mods: deferredContentFingerprints=true, count=" +
+                std::to_string(modsToRegister.size()));
             InstanceMetadataStore::registerInstalledMods(
                 stagingDescriptor.projectDirectory,
                 modsToRegister,
@@ -2720,7 +3101,7 @@ namespace fluxora
                         : static_cast<int>((processedMods * 100) / totalMods);
                     request.progress(ModOrganizerImportProgress{
                         L"database",
-                        L"Сканирую моды и записываю базу",
+                        L"Регистрирую моды и записываю базу",
                         std::wstring(folderName),
                         82 + static_cast<int>(((std::min)(100, databasePercent) * 16) / 100),
                         100,
@@ -2765,7 +3146,8 @@ namespace fluxora
             writeBuildManifest(
                 finalDescriptor,
                 plan.resolvedTemplate,
-                plan.executableImport.executables);
+                plan.executableImport.executables,
+                plan.fingerprint);
             const BuildPathSettings importedPathSettings = pathSettings_.saveForConfig(
                 finalDescriptor.configPath,
                 BuildPathSettings{
@@ -2797,6 +3179,15 @@ namespace fluxora
                     "\", staging=\"" + pathForLog(stagingProjectDirectory) +
                     "\", destination=\"" + pathForLog(finalProjectDirectory) + "\"" +
                     importDiagnosticsSuffix(diagnostics));
+            logger_.writeOperation(
+                LogLevel::Error,
+                "MO2Import",
+                std::string("importProject failed reason=\"") + exception.what() +
+                    "\", staging=\"" + pathForLog(stagingProjectDirectory) +
+                    "\", destination=\"" + pathForLog(finalProjectDirectory) +
+                    "\", replacedProjectBackup=\"" + pathForLog(replacedProjectBackup) +
+                    "\", projectDirectoryActivated=" + (projectDirectoryActivated ? "1" : "0") +
+                    importDiagnosticsSuffix(diagnostics) + ".");
 
             if (!projectDirectoryActivated)
             {
@@ -2811,6 +3202,12 @@ namespace fluxora
                         replacedProjectBackup,
                         finalProjectDirectory,
                         "Failed to restore the previous target build folder after import failure.");
+                    logger_.writeOperation(
+                        LogLevel::Warning,
+                        "MO2Import",
+                        "importProject recovery restoredPreviousBuild backup=\"" +
+                            pathForLog(replacedProjectBackup) +
+                            "\", destination=\"" + pathForLog(finalProjectDirectory) + "\".");
                 }
                 catch (...)
                 {
@@ -2832,6 +3229,14 @@ namespace fluxora
                 std::string("Mod Organizer import failed with an unknown exception. destination=\"") +
                     pathForLog(finalProjectDirectory) + "\"" +
                     importDiagnosticsSuffix(diagnostics));
+            logger_.writeOperation(
+                LogLevel::Error,
+                "MO2Import",
+                std::string("importProject failed reason=\"unknown exception\", destination=\"") +
+                    pathForLog(finalProjectDirectory) +
+                    "\", replacedProjectBackup=\"" + pathForLog(replacedProjectBackup) +
+                    "\", projectDirectoryActivated=" + (projectDirectoryActivated ? "1" : "0") +
+                    importDiagnosticsSuffix(diagnostics) + ".");
             if (!projectDirectoryActivated)
             {
                 cleanupDirectoryTreeBestEffort(stagingProjectDirectory);
@@ -2845,6 +3250,12 @@ namespace fluxora
                         replacedProjectBackup,
                         finalProjectDirectory,
                         "Failed to restore the previous target build folder after import failure.");
+                    logger_.writeOperation(
+                        LogLevel::Warning,
+                        "MO2Import",
+                        "importProject recovery restoredPreviousBuild backup=\"" +
+                            pathForLog(replacedProjectBackup) +
+                            "\", destination=\"" + pathForLog(finalProjectDirectory) + "\".");
                 }
                 catch (...)
                 {
@@ -2880,6 +3291,17 @@ namespace fluxora
             std::string("Mod Organizer 2 instance imported. destination=\"") +
                 pathForLog(finalProjectDirectory) + "\"" +
                 importDiagnosticsSuffix(diagnostics));
+        logger_.writeOperation(
+            LogLevel::Info,
+            "MO2Import",
+            "importProject completed selectedGameId=\"" + toUtf8(plan.fingerprint.gameId) +
+                "\", definitionVersion=\"" + toUtf8(plan.fingerprint.gameDefinitionVersion) +
+                "\", healthResult=\"" + toUtf8(plan.fingerprint.healthStatusAtCreation) +
+                "\", projectFingerprint=\"" + toUtf8(plan.fingerprint.gameId) + "@" +
+                toUtf8(plan.fingerprint.gameDefinitionVersion) +
+                "\", destination=\"" + pathForLog(finalProjectDirectory) +
+                "\", configPath=\"" + pathForLog(finalDescriptor.configPath) + "\"" +
+                importDiagnosticsSuffix(diagnostics) + ".");
         return ModOrganizerImportResult{
             projects_.openProjectConfig(finalDescriptor.configPath),
             plan.analysis

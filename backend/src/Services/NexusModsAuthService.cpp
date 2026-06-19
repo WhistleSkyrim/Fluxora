@@ -33,7 +33,7 @@ namespace fluxora
 {
     namespace
     {
-        constexpr std::wstring_view defaultClientId = L"vortex_loopback";
+        constexpr std::wstring_view defaultClientId = L"";
         constexpr std::wstring_view defaultRedirectUri = L"http://127.0.0.1:PORT";
         constexpr std::wstring_view authorizeEndpoint = L"https://users.nexusmods.com/oauth/authorize";
         constexpr std::wstring_view tokenHost = L"users.nexusmods.com";
@@ -1173,9 +1173,9 @@ namespace fluxora
         {
             NexusModsAuthStatus status;
             status.isConfigured = !config.clientId.empty();
-            status.isLinked = auth.linked;
-            status.displayName = auth.username;
-            status.userId = auth.userId;
+            status.isLinked = auth.linked && !auth.protectedAccessToken.empty();
+            status.displayName = status.isLinked ? auth.username : L"";
+            status.userId = status.isLinked ? auth.userId : L"";
             status.clientId = config.clientId;
             status.redirectUri = config.redirectUri;
 
@@ -1269,8 +1269,6 @@ namespace fluxora
                 throw std::runtime_error("NexusMods OAuth state validation failed.");
             }
 
-            callbackListener.respondSuccess();
-
             const std::string tokenResponseBody = postTokenRequest(
                 buildTokenRequestBody(config, redirectUri, callback.code, codeVerifier));
             const TokenResponse tokens = parseTokenResponse(tokenResponseBody);
@@ -1287,6 +1285,7 @@ namespace fluxora
                 ? L""
                 : protectSecret(tokens.refreshToken);
             settings_.saveNexusModsAuth(stored);
+            callbackListener.respondSuccess();
 
             OAuthConfig statusConfig = config;
             statusConfig.redirectUri = redirectUri;

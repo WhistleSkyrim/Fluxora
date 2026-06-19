@@ -76,12 +76,70 @@ public sealed class DownloadCatalogService : IAppService
         ModProject project,
         DownloadEntry download,
         string modName,
+        ExistingModInstallMode existingModMode,
         CancellationToken cancellationToken = default)
     {
         return coreBridgeService.InstallDownloadAsync(
             project.ProjectDirectory,
             download.LocalPath,
             modName,
+            existingModMode,
+            cancellationToken);
+    }
+
+    public Task<ContentLayoutPreview> AnalyzeDownloadContentLayoutAsync(
+        ModProject project,
+        DownloadEntry download,
+        ExistingModInstallMode existingModMode,
+        CancellationToken cancellationToken = default)
+    {
+        return coreBridgeService.AnalyzeDownloadContentLayoutAsync(
+            project.ProjectDirectory,
+            download.LocalPath,
+            existingModMode,
+            cancellationToken);
+    }
+
+    public Task<FomodInstallerInfo> AnalyzeFomodDownloadAsync(
+        ModProject project,
+        DownloadEntry download,
+        CancellationToken cancellationToken = default)
+    {
+        return coreBridgeService.AnalyzeFomodDownloadAsync(
+            project.ProjectDirectory,
+            download.LocalPath,
+            cancellationToken);
+    }
+
+    public Task<ContentLayoutPreview> AnalyzeFomodDownloadContentLayoutAsync(
+        ModProject project,
+        DownloadEntry download,
+        ExistingModInstallMode existingModMode,
+        IReadOnlyList<string> selectedOptionIds,
+        CancellationToken cancellationToken = default)
+    {
+        return coreBridgeService.AnalyzeFomodDownloadContentLayoutAsync(
+            project.ProjectDirectory,
+            download.LocalPath,
+            existingModMode,
+            selectedOptionIds,
+            cancellationToken);
+    }
+
+    public Task<ModEntry> InstallFomodDownloadAsync(
+        ModProject project,
+        DownloadEntry download,
+        string modName,
+        ExistingModInstallMode existingModMode,
+        IReadOnlyList<string> selectedOptionIds,
+        CancellationToken cancellationToken = default)
+    {
+        return coreBridgeService.InstallFomodDownloadAsync(
+            project.ProjectDirectory,
+            download.LocalPath,
+            modName,
+            existingModMode,
+            selectedOptionIds,
             cancellationToken);
     }
 }

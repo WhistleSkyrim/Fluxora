@@ -44,6 +44,7 @@ namespace fluxora
         std::wstring version;
         bool isEnabled{true};
         ModSourceRecord source;
+        bool computeContentFingerprint{true};
     };
 
     using InstalledModImportProgress =
@@ -127,6 +128,9 @@ namespace fluxora
         static void ensureInstance(
             const std::filesystem::path& projectDirectory,
             std::wstring_view gameId = {});
+
+        [[nodiscard]] static std::wstring gameId(
+            const std::filesystem::path& projectDirectory);
 
         [[nodiscard]] static std::vector<InstalledModRecord> listInstalledMods(
             const std::filesystem::path& projectDirectory,

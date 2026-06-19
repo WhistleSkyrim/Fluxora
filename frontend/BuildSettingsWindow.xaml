@@ -14,8 +14,11 @@
         ResizeMode="CanResize"
         Background="#080711"
         FontFamily="{StaticResource FluxoraFontBody}"
+        FontWeight="Medium"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
+        TextOptions.TextHintingMode="Fixed"
+        RenderOptions.ClearTypeHint="Enabled"
         FontSize="13"
         Loaded="OnLoaded">
     <shell:WindowChrome.WindowChrome>
@@ -126,7 +129,7 @@
             <Setter Property="Height" Value="40" />
             <Setter Property="Padding" Value="15,0" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -141,7 +144,9 @@
                                 CornerRadius="10">
                             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                              Margin="{TemplateBinding Padding}" />
+                                              Margin="{TemplateBinding Padding}"
+                                              TextElement.FontWeight="{TemplateBinding FontWeight}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -194,6 +199,7 @@
             <Setter Property="BorderBrush" Value="#7A63B8" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Cursor" Value="Arrow" />
             <Setter Property="HorizontalContentAlignment" Value="Left" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
@@ -214,7 +220,9 @@
                                     Background="{StaticResource AccentGradientBrush}" />
                             <ContentPresenter Margin="{TemplateBinding Padding}"
                                               HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              TextElement.FontWeight="{TemplateBinding FontWeight}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
                         </Grid>
                     </ControlTemplate>
                 </Setter.Value>
@@ -225,7 +233,7 @@
             <Setter Property="Height" Value="38" />
             <Setter Property="MinWidth" Value="0" />
             <Setter Property="Padding" Value="12,0" />
-            <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI" />
+            <Setter Property="FontFamily" Value="{StaticResource FluxoraFontBody}" />
             <Setter Property="FontSize" Value="12" />
             <Setter Property="Background" Value="{StaticResource PanelSoftBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
@@ -272,23 +280,105 @@
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
-        <Style x:Key="FluxoraScrollThumbStyle" TargetType="{x:Type Thumb}">
+        <Geometry x:Key="FluxoraScrollArrowUpGeometry">M 0 5 L 4 1 L 8 5 Z</Geometry>
+        <Geometry x:Key="FluxoraScrollArrowDownGeometry">M 0 1 L 8 1 L 4 5 Z</Geometry>
+        <Geometry x:Key="FluxoraScrollArrowLeftGeometry">M 5 0 L 1 4 L 5 8 Z</Geometry>
+        <Geometry x:Key="FluxoraScrollArrowRightGeometry">M 1 0 L 5 4 L 1 8 Z</Geometry>
+
+        <Style x:Key="FluxoraVerticalScrollThumbStyle" TargetType="{x:Type Thumb}">
             <Setter Property="OverridesDefaultStyle" Value="True" />
             <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="MinHeight" Value="34" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type Thumb}">
-                        <Border x:Name="Bar"
-                                Margin="2"
-                                Background="{StaticResource LineHoverBrush}"
-                                CornerRadius="4"
-                                SnapsToDevicePixels="True" />
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="Bar"
+                                    Background="{StaticResource LineHoverBrush}"
+                                    Width="7"
+                                    MinHeight="34"
+                                    Margin="0,1"
+                                    CornerRadius="3.5"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Stretch" />
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Bar" Property="Background" Value="{StaticResource AccentBrush}" />
                             </Trigger>
                             <Trigger Property="IsDragging" Value="True">
                                 <Setter TargetName="Bar" Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="FluxoraHorizontalScrollThumbStyle" TargetType="{x:Type Thumb}">
+            <Setter Property="OverridesDefaultStyle" Value="True" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="MinWidth" Value="34" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Thumb}">
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="Bar"
+                                    Background="{StaticResource LineHoverBrush}"
+                                    Width="34"
+                                    Height="7"
+                                    Margin="1,0"
+                                    CornerRadius="3.5"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Center" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bar" Property="Background" Value="{StaticResource AccentBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="Bar" Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="FluxoraScrollLineButtonStyle" TargetType="{x:Type RepeatButton}">
+            <Setter Property="OverridesDefaultStyle" Value="True" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Delay" Value="280" />
+            <Setter Property="Interval" Value="45" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type RepeatButton}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <Path x:Name="Arrow"
+                                  Data="{TemplateBinding Content}"
+                                  Width="8"
+                                  Height="5"
+                                  Fill="{StaticResource MutedTextBrush}"
+                                  Stretch="Uniform"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource PanelHoverBrush}" />
+                                <Setter TargetName="Arrow" Property="Fill" Value="{StaticResource TextSecondaryBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                                <Setter TargetName="Arrow" Property="Fill" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Arrow" Property="Opacity" Value="0.35" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -312,15 +402,33 @@
 
         <Style TargetType="{x:Type ScrollBar}">
             <Setter Property="Background" Value="Transparent" />
-            <Setter Property="Width" Value="11" />
-            <Setter Property="MinWidth" Value="11" />
+            <Setter Property="Width" Value="18" />
+            <Setter Property="MinWidth" Value="18" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type ScrollBar}">
                         <Grid Background="{TemplateBinding Background}"
-                              Margin="0,3,0,3">
+                              ClipToBounds="False">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="12" />
+                                <RowDefinition Height="3" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="3" />
+                                <RowDefinition Height="12" />
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="7" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <RepeatButton Grid.ColumnSpan="3"
+                                          Style="{StaticResource FluxoraScrollLineButtonStyle}"
+                                          Command="ScrollBar.LineUpCommand"
+                                          Content="{StaticResource FluxoraScrollArrowUpGeometry}" />
                             <Track x:Name="PART_Track"
+                                   Grid.Row="2"
+                                   Grid.Column="1"
                                    Orientation="Vertical"
                                    IsDirectionReversed="True">
                                 <Track.DecreaseRepeatButton>
@@ -332,10 +440,14 @@
                                                   Command="ScrollBar.PageDownCommand" />
                                 </Track.IncreaseRepeatButton>
                                 <Track.Thumb>
-                                    <Thumb Style="{StaticResource FluxoraScrollThumbStyle}"
-                                           MinHeight="30" />
+                                    <Thumb Style="{StaticResource FluxoraVerticalScrollThumbStyle}" />
                                 </Track.Thumb>
                             </Track>
+                            <RepeatButton Grid.Row="4"
+                                          Grid.ColumnSpan="3"
+                                          Style="{StaticResource FluxoraScrollLineButtonStyle}"
+                                          Command="ScrollBar.LineDownCommand"
+                                          Content="{StaticResource FluxoraScrollArrowDownGeometry}" />
                         </Grid>
                     </ControlTemplate>
                 </Setter.Value>
@@ -344,14 +456,32 @@
                 <Trigger Property="Orientation" Value="Horizontal">
                     <Setter Property="Width" Value="Auto" />
                     <Setter Property="MinWidth" Value="0" />
-                    <Setter Property="Height" Value="11" />
-                    <Setter Property="MinHeight" Value="11" />
+                    <Setter Property="Height" Value="18" />
+                    <Setter Property="MinHeight" Value="18" />
                     <Setter Property="Template">
                         <Setter.Value>
                             <ControlTemplate TargetType="{x:Type ScrollBar}">
                                 <Grid Background="{TemplateBinding Background}"
-                                      Margin="3,0,3,0">
+                                      ClipToBounds="False">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="7" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="12" />
+                                        <ColumnDefinition Width="3" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="3" />
+                                        <ColumnDefinition Width="12" />
+                                    </Grid.ColumnDefinitions>
+                                    <RepeatButton Grid.RowSpan="3"
+                                                  Style="{StaticResource FluxoraScrollLineButtonStyle}"
+                                                  Command="ScrollBar.LineLeftCommand"
+                                                  Content="{StaticResource FluxoraScrollArrowLeftGeometry}" />
                                     <Track x:Name="PART_Track"
+                                           Grid.Row="1"
+                                           Grid.Column="2"
                                            Orientation="Horizontal">
                                         <Track.DecreaseRepeatButton>
                                             <RepeatButton Style="{StaticResource FluxoraScrollPageButtonStyle}"
@@ -362,10 +492,14 @@
                                                           Command="ScrollBar.PageRightCommand" />
                                         </Track.IncreaseRepeatButton>
                                         <Track.Thumb>
-                                            <Thumb Style="{StaticResource FluxoraScrollThumbStyle}"
-                                                   MinWidth="30" />
+                                            <Thumb Style="{StaticResource FluxoraHorizontalScrollThumbStyle}" />
                                         </Track.Thumb>
                                     </Track>
+                                    <RepeatButton Grid.Column="4"
+                                                  Grid.RowSpan="3"
+                                                  Style="{StaticResource FluxoraScrollLineButtonStyle}"
+                                                  Command="ScrollBar.LineRightCommand"
+                                                  Content="{StaticResource FluxoraScrollArrowRightGeometry}" />
                                 </Grid>
                             </ControlTemplate>
                         </Setter.Value>

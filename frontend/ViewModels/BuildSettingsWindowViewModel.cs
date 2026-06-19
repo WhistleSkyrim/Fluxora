@@ -9,19 +9,6 @@ namespace Fluxora.App.ViewModels;
 
 public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
 {
-    private static readonly string[] PrimaryGameExecutableNames =
-    {
-        "SkyrimSE.exe",
-        "Skyrim SE.exe",
-        "SkyrimSELauncher.exe",
-        "SkyrimVR.exe",
-        "SkyrimVRLauncher.exe",
-        "TESV.exe",
-        "SkyrimLauncher.exe",
-        "Fallout4.exe",
-        "Starfield.exe"
-    };
-
     private readonly CoreBridgeService coreBridgeService;
     private readonly IFolderPickerService folderPickerService;
     private readonly IExecutablePickerService executablePickerService;
@@ -309,11 +296,19 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
         }
 
         GameExecutableEntry primary = updated[index];
-        primary.Id = string.IsNullOrWhiteSpace(primary.Id) ? "game" : primary.Id;
-        primary.DisplayName = DisplayNameForExecutable(normalizedExecutablePath);
+        ExecutableDisplayMetadata metadata = ResolveExecutableMetadata(normalizedExecutablePath);
+        primary.Id = !string.IsNullOrWhiteSpace(metadata.Id)
+            ? metadata.Id
+            : string.IsNullOrWhiteSpace(primary.Id)
+                ? "game"
+                : primary.Id;
+        primary.DisplayName = !string.IsNullOrWhiteSpace(metadata.DisplayName)
+            ? metadata.DisplayName
+            : DisplayNameForExecutable(normalizedExecutablePath);
         primary.ExecutablePath = storedExecutablePath;
         primary.WorkingDirectory = string.Empty;
         primary.IconPath = string.Empty;
+        primary.ExecutableDisplayMetadata = metadata;
         return updated;
     }
 
@@ -334,7 +329,7 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
             return ResolveExecutablePath(primary.ExecutablePath, currentGameDirectory);
         }
 
-        foreach (string executableName in PrimaryGameExecutableNames)
+        foreach (string executableName in KnownExecutableNames())
         {
             string candidate = Path.Combine(currentGameDirectory, executableName);
             if (File.Exists(candidate))
@@ -350,8 +345,10 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
     {
         string resolvedPath = ResolveExecutablePath(executable.ExecutablePath, currentGameDirectory);
         string fileName = Path.GetFileName(resolvedPath);
-        return PrimaryGameExecutableNames.Any(
-            name => string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase)) ||
+        return executable.ExecutableDisplayMetadata.IsPrimary ||
+            string.Equals(executable.ExecutableDisplayMetadata.Role, "primary", StringComparison.OrdinalIgnoreCase) ||
+            KnownExecutableNames().Any(
+                name => string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase)) ||
             string.Equals(executable.Id, "game", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -407,13 +404,70 @@ public sealed class BuildSettingsWindowViewModel : INotifyPropertyChanged
             : executablePath;
     }
 
-    private static string DisplayNameForExecutable(string executablePath)
+    private string DisplayNameForExecutable(string executablePath)
+    {
+        ExecutableDisplayMetadata metadata = ResolveExecutableMetadata(executablePath);
+        return string.IsNullOrWhiteSpace(metadata.DisplayName)
+            ? Path.GetFileNameWithoutExtension(executablePath)
+            : metadata.DisplayName;
+    }
+
+    private ExecutableDisplayMetadata ResolveExecutableMetadata(string executablePath)
     {
         string fileName = Path.GetFileName(executablePath);
-        return PrimaryGameExecutableNames.Any(
-            name => string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase))
-            ? "Skyrim Special Edition"
-            : Path.GetFileNameWithoutExtension(executablePath);
+        ExecutableDisplayMetadata? metadata = project.Template?.ExecutableDisplayMetadata.FirstOrDefault(candidate =>
+            !string.IsNullOrWhiteSpace(candidate.ExecutableName) &&
+            string.Equals(candidate.ExecutableName, fileName, StringComparison.OrdinalIgnoreCase));
+        metadata ??= executables
+            .Select(executable => executable.ExecutableDisplayMetadata)
+            .FirstOrDefault(candidate =>
+                !string.IsNullOrWhiteSpace(candidate.ExecutableName) &&
+                string.Equals(candidate.ExecutableName, fileName, StringComparison.OrdinalIgnoreCase));
+
+        if (metadata is null)
+        {
+            return new ExecutableDisplayMetadata
+            {
+                DisplayName = Path.GetFileNameWithoutExtension(executablePath),
+                ExecutableName = fileName
+            };
+        }
+
+        return new ExecutableDisplayMetadata
+        {
+            Id = metadata.Id,
+            DisplayName = metadata.DisplayName,
+            ExecutableName = metadata.ExecutableName,
+            Role = metadata.Role,
+            WorkingDirectoryKind = metadata.WorkingDirectoryKind,
+            IsPrimary = metadata.IsPrimary,
+            IsLauncher = metadata.IsLauncher,
+            IsScriptExtender = metadata.IsScriptExtender
+        };
+    }
+
+    private IReadOnlyList<string> KnownExecutableNames()
+    {
+        List<string> names = new();
+        if (project.Template is not null)
+        {
+            names.AddRange(project.Template.ExecutableDisplayMetadata.Select(metadata => metadata.ExecutableName));
+            names.AddRange(project.Template.Executables
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!));
+        }
+
+        names.AddRange(executables
+            .Select(executable => Path.GetFileName(executable.ExecutablePath))
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!));
+        names.Add(project.ProjectFingerprint?.SelectedExecutable ?? string.Empty);
+
+        return names
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private void BrowsePath(string title, string currentPath, Action<string> apply)

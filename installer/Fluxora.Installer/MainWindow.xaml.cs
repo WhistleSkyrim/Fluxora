@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using Fluxora.App.Services;
 using Fluxora.Installer.Models;
 using Fluxora.Installer.Services;
@@ -16,7 +17,7 @@ public partial class MainWindow : Window
 {
     private readonly InstallerText text = new();
     private readonly LegalDocumentService legalDocumentService = new();
-    private readonly InstallerNativeBridge nativeBridge = new();
+    private readonly InstallerNativeBridge nativeBridge;
     private readonly PayloadResourceService payloadResourceService = new();
     private readonly InstallerLogService logService = new();
     private readonly WindowChromeService chromeService;
@@ -39,6 +40,8 @@ public partial class MainWindow : Window
         chromeService = new WindowChromeService(this);
         chromeService.Attach();
         logService.Initialize();
+        RegisterCrashHandlers();
+        nativeBridge = new InstallerNativeBridge(logService);
 
         LanguageComboBox.ItemsSource = languages;
         LanguageComboBox.SelectedItem = PickDefaultLanguage();
@@ -271,6 +274,34 @@ public partial class MainWindow : Window
         logService.Dispose();
     }
 
+    private void RegisterCrashHandlers()
+    {
+        System.Windows.Application.Current.DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+    }
+
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        logService.CrashError("Unhandled dispatcher exception.", e.Exception);
+    }
+
+    private void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    {
+        if (e.ExceptionObject is Exception exception)
+        {
+            logService.CrashError("Unhandled application domain exception.", exception);
+            return;
+        }
+
+        logService.CrashError($"Unhandled application domain exception object: {e.ExceptionObject}");
+    }
+
+    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        logService.CrashError("Unobserved task exception.", e.Exception);
+    }
+
     private void OnDragMove(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left)
@@ -382,15 +413,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!nativeBridge.IsAvailable())
-        {
-            ShowError(T("MissingNative"));
-            return;
-        }
-
         string payloadPath = string.Empty;
+        string installPath = NormalizeInstallPath(InstallPathTextBox.Text);
+        using InstallerLogService.OperationScope operation = logService.BeginOperation(
+            "InstallPackage",
+            $"target=\"{installPath}\", createDesktopShortcut={ShortcutCheckBox.IsChecked == true}");
         try
         {
+            if (!nativeBridge.IsAvailable())
+            {
+                throw new InvalidOperationException(T("MissingNative"));
+            }
+
             isInstalling = true;
             stepIndex = 3;
             installerResult = null;
@@ -401,7 +435,6 @@ public partial class MainWindow : Window
             ProgressPhaseText.Text = T("ProgressPreparing");
             UpdateStep();
 
-            string installPath = NormalizeInstallPath(InstallPathTextBox.Text);
             InstallPathTextBox.Text = installPath;
             nativeBridge.ValidateInstallDirectory(installPath);
             payloadPath = payloadResourceService.ExtractPayloadToTemp();
@@ -414,10 +447,12 @@ public partial class MainWindow : Window
                 OnNativeProgress);
 
             logService.Info($"Install completed. app=\"{installerResult.ApplicationPath}\"");
+            operation.Complete($"app=\"{installerResult.ApplicationPath}\", installDirectory=\"{installerResult.InstallDirectory}\"");
             ShowSuccess(installerResult);
         }
         catch (Exception exception)
         {
+            operation.Fail(exception);
             logService.Error("Install failed.", exception);
             ShowError(exception.Message);
         }

@@ -27,6 +27,7 @@ public partial class SettingsWindow : Window
             coreBridgeService,
             settingsService,
             languageCatalogService,
+            null,
             folderPickerService,
             currentProject,
             replaceCurrentProject);

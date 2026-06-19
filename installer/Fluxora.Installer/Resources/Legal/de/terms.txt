@@ -5,7 +5,7 @@ Stand: 15. Juni 2026
 Mit der Installation oder Nutzung von Fluxora stimmen Sie diesen Nutzungsbedingungen und der Fluxora Datenschutzerklärung zu. Wenn Sie nicht zustimmen, installieren und nutzen Sie Fluxora nicht.
 
 2. Produkt
-Fluxora ist ein Desktop Mod Manager und Launcher im ModdingFlow Ökosystem. Der Installer entpackt eine portable Version von Fluxora in einen von Ihnen gewählten Ordner und kann auf Wunsch eine Desktop-Verknüpfung erstellen.
+Fluxora ist ein Desktop Mod Manager und Launcher im ModdingFlow Ökosystem. Der Installer installiert Fluxora in einen von Ihnen gewählten Ordner und kann auf Wunsch eine Desktop-Verknüpfung erstellen.
 
 3. Lizenz
 Fluxora ist proprietäre Software. Vorbehaltlich dieser Bedingungen erhalten Sie ein beschränktes, widerrufliches, nicht ausschließliches und nicht übertragbares Recht, Fluxora für den vorgesehenen Zweck zu installieren und zu nutzen. Sie erwerben kein Eigentum an Fluxora, Quellcode, Marken, Icons, Assets oder Dokumentation.

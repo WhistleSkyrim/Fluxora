@@ -16,22 +16,23 @@ internal sealed class DropIndicatorAdorner : Adorner
     private static readonly WpfBrush AccentBrush = new SolidColorBrush(WpfColor.FromRgb(139, 92, 246));
     private static readonly WpfBrush LabelBackgroundBrush = new SolidColorBrush(WpfColor.FromRgb(36, 26, 70));
     private static readonly WpfBrush LabelTextBrush = new SolidColorBrush(WpfColor.FromRgb(247, 244, 255));
+    private static readonly WpfFontFamily FallbackFontFamily = new(new Uri("pack://application:,,,/"), "./Fonts/#Onest");
 
     private readonly FormattedText labelText;
     private double y;
     private bool isVisible;
 
-    public DropIndicatorAdorner(UIElement adornedElement)
+    public DropIndicatorAdorner(UIElement adornedElement, string label = "Вставить сюда")
         : base(adornedElement)
     {
         IsHitTestVisible = false;
         labelText = new FormattedText(
-            "Вставить сюда",
+            label,
             CultureInfo.CurrentUICulture,
             System.Windows.FlowDirection.LeftToRight,
             new Typeface(
                 WpfApplication.Current.TryFindResource("FluxoraFontBody") as WpfFontFamily
-                    ?? new WpfFontFamily("Segoe UI Variable, Segoe UI"),
+                    ?? FallbackFontFamily,
                 FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal),
             10,
             LabelTextBrush,

@@ -1,0 +1,157 @@
+{
+  "schemaVersion": "1",
+  "definitionVersion": "1.0.0",
+  "id": "skyrimse",
+  "displayName": "Skyrim Special Edition",
+  "summary": "Сборка для Skyrim SE: плагины .esp/.esm/.esl, порядок загрузки, INI-твики и SKSE64.",
+  "aliases": [
+    "Skyrim SE",
+    "Skyrim AE",
+    "Skyrim Special Edition",
+    "Skyrim Anniversary Edition"
+  ],
+  "domains": [
+    "skyrimspecialedition"
+  ],
+  "installFolderAliases": [
+    "Skyrim Special Edition",
+    "SkyrimSE",
+    "Skyrim SE",
+    "Skyrim"
+  ],
+  "defaultProfileName": "Default",
+  "dataFolder": "Data",
+  "requiredFiles": [
+    "SkyrimSE.exe",
+    "Data/Skyrim.esm"
+  ],
+  "executables": [
+    {
+      "id": "game",
+      "displayName": "Skyrim Special Edition",
+      "name": "SkyrimSE.exe",
+      "role": "primary"
+    },
+    {
+      "id": "launcher",
+      "displayName": "Skyrim Launcher",
+      "name": "SkyrimSELauncher.exe",
+      "role": "launcher"
+    },
+    {
+      "id": "script-extender",
+      "displayName": "SKSE64",
+      "name": "skse64_loader.exe",
+      "role": "scriptExtender",
+      "workingDirectory": "gameRoot"
+    }
+  ],
+  "executableRoles": {
+    "primary": "SkyrimSE.exe",
+    "launcher": "SkyrimSELauncher.exe",
+    "scriptExtender": "skse64_loader.exe"
+  },
+  "archiveExtensions": [
+    ".zip",
+    ".7z",
+    ".rar",
+    ".fomod",
+    ".omod",
+    ".tar",
+    ".tgz",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".zst",
+    ".bsa"
+  ],
+  "pluginExtensions": [
+    ".esm",
+    ".esp",
+    ".esl"
+  ],
+  "capabilities": {
+    "supportsPlugins": true,
+    "supportsLoadOrder": true,
+    "supportsRootFiles": true,
+    "supportsArchives": true,
+    "supportsScriptExtender": true,
+    "supportsIniProfiles": true,
+    "supportsSaveProfiles": true,
+    "supportsGameSpecificVfs": true,
+    "supportsContentLayoutRules": true
+  },
+  "uiTemplateId": "skyrimse",
+  "detectionHints": {
+    "executableNames": [
+      "SkyrimSE.exe",
+      "Skyrim SE.exe",
+      "SkyrimSELauncher.exe"
+    ],
+    "folderNames": [
+      "Skyrim Special Edition",
+      "SkyrimSE",
+      "Skyrim SE"
+    ],
+    "domains": [
+      "skyrimspecialedition"
+    ]
+  },
+  "pluginRules": {
+    "profileFiles": [
+      "plugins.txt",
+      "loadorder.txt"
+    ],
+    "basePlugins": [
+      "Skyrim.esm",
+      "Update.esm",
+      "Dawnguard.esm",
+      "HearthFires.esm",
+      "Dragonborn.esm"
+    ]
+  },
+  "contentLayoutRules": {
+    "dataFolder": "Data",
+    "supportsRootFiles": true,
+    "rootFileWrapperDirectory": "root"
+  },
+  "vfsRules": {
+    "supportsRootBuilder": true,
+    "rootBuilderDirectoryName": "root",
+    "userSettingsDirectoryName": "Skyrim Special Edition",
+    "profileIniFileNames": [
+      "Skyrim.ini",
+      "SkyrimCustom.ini",
+      "SkyrimPrefs.ini"
+    ],
+    "saveDirectoryNames": [
+      "Saves"
+    ],
+    "excludedLaunchCacheDirectories": [
+      "root",
+      "SKSE",
+      "DLLPlugins",
+      "Plugins",
+      "NetScriptFramework"
+    ]
+  },
+  "launchRules": {
+    "scriptExtender": {
+      "name": "Skyrim Script Extender (SKSE64)",
+      "loaderExecutable": "skse64_loader.exe",
+      "website": "https://skse.silverlock.org/",
+      "expectedChildProcessNames": [
+        "SkyrimSE.exe"
+      ],
+      "handoffDisplayName": "Skyrim Special Edition",
+      "handoffTimeoutMs": 30000,
+      "launchTrackingKind": "expectedChildProcess"
+    }
+  },
+  "healthRules": {
+    "requiredFiles": [
+      "SkyrimSE.exe",
+      "Data/Skyrim.esm"
+    ]
+  }
+}

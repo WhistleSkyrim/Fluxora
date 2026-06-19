@@ -13,6 +13,7 @@ namespace fluxora
     class DownloadService;
     class ExecutableService;
     class ExecutableIconService;
+    class FluxPackService;
     class VirtualFileSystemService;
     class AppSettingsService;
     class BuildPathSettingsService;
@@ -43,6 +44,7 @@ namespace fluxora
         [[nodiscard]] DownloadService& downloads() noexcept;
         [[nodiscard]] ExecutableService& executables() noexcept;
         [[nodiscard]] ExecutableIconService& executableIcons() noexcept;
+        [[nodiscard]] FluxPackService& fluxPacks() noexcept;
         [[nodiscard]] VirtualFileSystemService& virtualFileSystem() noexcept;
         [[nodiscard]] NexusModsAuthService& nexusModsAuth() noexcept;
         [[nodiscard]] ProjectService& projects() noexcept;
@@ -64,6 +66,7 @@ namespace fluxora
         std::unique_ptr<NexusModsAuthService> nexusModsAuth_;
         std::unique_ptr<TemplateService> templates_;
         std::unique_ptr<ProjectService> projects_;
+        std::unique_ptr<FluxPackService> fluxPacks_;
         std::unique_ptr<ModOrganizerImportService> modOrganizerImport_;
         std::unique_ptr<VirtualFileSystemService> virtualFileSystem_;
         bool initialized_{false};

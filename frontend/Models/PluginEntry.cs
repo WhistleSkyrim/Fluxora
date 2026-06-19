@@ -46,6 +46,13 @@ public sealed class PluginEntry : ICollapsibleListItem, INotifyPropertyChanged
         set => SetField(ref isUnderSeparator, value);
     }
 
+    private bool isSelected;
+    public bool IsSelected
+    {
+        get => isSelected;
+        set => SetField(ref isSelected, value);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void SetField(ref bool field, bool value, [CallerMemberName] string? propertyName = null)

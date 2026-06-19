@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FluxoraCore/GameSupport/IGameSupport.hpp"
 #include "FluxoraCore/Services/IService.hpp"
 #include "FluxoraCore/Services/TemplateService.hpp"
 
@@ -12,6 +13,7 @@ namespace fluxora
 {
     class Logger;
     class BuildPathSettingsService;
+    struct GameHealthCheckResult;
 
     struct PluginEntry
     {
@@ -29,6 +31,15 @@ namespace fluxora
         std::wstring separatorTitle;
     };
 
+    struct PluginRuleContext
+    {
+        const IPluginRulesProvider* rulesProvider{nullptr};
+        const CapabilitySet* capabilities{nullptr};
+        const GameHealthCheckResult* health{nullptr};
+        std::wstring defaultProfileName;
+        std::wstring gameId;
+    };
+
     class PluginService final : public IService
     {
     public:
@@ -44,9 +55,21 @@ namespace fluxora
             const BuildTemplate& resolvedTemplate,
             std::wstring_view profileName) const;
 
+        [[nodiscard]] std::vector<PluginEntry> listPlugins(
+            const std::filesystem::path& projectDirectory,
+            const PluginRuleContext& rules,
+            std::wstring_view profileName) const;
+
         [[nodiscard]] std::vector<PluginEntry> movePlugin(
             const std::filesystem::path& projectDirectory,
             const BuildTemplate& resolvedTemplate,
+            std::wstring_view profileName,
+            std::wstring_view orderItemId,
+            int targetIndex) const;
+
+        [[nodiscard]] std::vector<PluginEntry> movePlugin(
+            const std::filesystem::path& projectDirectory,
+            const PluginRuleContext& rules,
             std::wstring_view profileName,
             std::wstring_view orderItemId,
             int targetIndex) const;
@@ -58,15 +81,35 @@ namespace fluxora
             std::wstring_view title,
             int targetIndex) const;
 
+        [[nodiscard]] std::vector<PluginEntry> createPluginSeparator(
+            const std::filesystem::path& projectDirectory,
+            const PluginRuleContext& rules,
+            std::wstring_view profileName,
+            std::wstring_view title,
+            int targetIndex) const;
+
         [[nodiscard]] std::vector<PluginEntry> deletePluginSeparator(
             const std::filesystem::path& projectDirectory,
             const BuildTemplate& resolvedTemplate,
             std::wstring_view profileName,
             std::wstring_view separatorId) const;
 
+        [[nodiscard]] std::vector<PluginEntry> deletePluginSeparator(
+            const std::filesystem::path& projectDirectory,
+            const PluginRuleContext& rules,
+            std::wstring_view profileName,
+            std::wstring_view separatorId) const;
+
         [[nodiscard]] std::vector<PluginEntry> setPluginEnabled(
             const std::filesystem::path& projectDirectory,
             const BuildTemplate& resolvedTemplate,
+            std::wstring_view profileName,
+            std::wstring_view pluginName,
+            bool isEnabled) const;
+
+        [[nodiscard]] std::vector<PluginEntry> setPluginEnabled(
+            const std::filesystem::path& projectDirectory,
+            const PluginRuleContext& rules,
             std::wstring_view profileName,
             std::wstring_view pluginName,
             bool isEnabled) const;

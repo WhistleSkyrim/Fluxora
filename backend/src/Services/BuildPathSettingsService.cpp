@@ -1,6 +1,12 @@
 #include "FluxoraCore/Services/BuildPathSettingsService.hpp"
 
+#include "FluxoraCore/GameSupport/GameDetectionService.hpp"
+#include "FluxoraCore/GameSupport/GameHealthCheckService.hpp"
+#include "FluxoraCore/GameSupport/GameSupportRegistry.hpp"
 #include "FluxoraCore/Services/Logger.hpp"
+#include "FluxoraCore/Services/PathSafetyService.hpp"
+#include "FluxoraCore/Storage/AtomicFileStore.hpp"
+#include "FluxoraCore/Storage/ProjectStateTransaction.hpp"
 #include "FluxoraCore/Support/JsonReader.hpp"
 #include "FluxoraCore/Support/JsonWriter.hpp"
 
@@ -13,6 +19,8 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,7 +33,6 @@ namespace fluxora
         constexpr std::wstring_view pathsField = L"paths";
         constexpr std::wstring_view localSettingsDirectoryName = L".fluxora";
         constexpr std::wstring_view localSettingsFileName = L"paths.json";
-        constexpr std::wstring_view transientFileExtension = L".tmp";
 
         std::string toUtf8(const std::wstring& value)
         {
@@ -120,32 +127,32 @@ namespace fluxora
                 std::istreambuf_iterator<char>());
         }
 
-        void writeTextFileAtomic(const std::filesystem::path& path, const std::string& content)
+        void recoverJsonStateFile(
+            const std::filesystem::path& path,
+            std::wstring stateName,
+            Logger* logger)
         {
-            if (!path.parent_path().empty())
-            {
-                std::filesystem::create_directories(path.parent_path());
-            }
+            static_cast<void>(AtomicFileStore().recoverFile(
+                path,
+                AtomicFileWriteOptions{
+                    std::move(stateName),
+                    ProjectStateValidation::JsonObject
+                },
+                logger));
+        }
 
-            const std::filesystem::path temporaryPath = path.wstring() + std::wstring(transientFileExtension);
-            std::ofstream file(temporaryPath, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!file)
-            {
-                throw std::runtime_error("Failed to write build path settings.");
-            }
-
-            file.write(content.data(), static_cast<std::streamsize>(content.size()));
-            file.close();
-
-            std::error_code error;
-            std::filesystem::rename(temporaryPath, path, error);
-            if (!error)
-            {
-                return;
-            }
-
-            std::filesystem::remove(path, error);
-            std::filesystem::rename(temporaryPath, path);
+        void writeJsonStateFile(
+            const std::filesystem::path& path,
+            const std::string& content,
+            std::wstring stateName)
+        {
+            AtomicFileStore().writeTextFile(
+                path,
+                content,
+                AtomicFileWriteOptions{
+                    std::move(stateName),
+                    ProjectStateValidation::JsonObject
+                });
         }
 
         JsonValue parseJsonConfig(const std::string& content)
@@ -266,66 +273,25 @@ namespace fluxora
             return std::filesystem::exists(path, error) && std::filesystem::is_regular_file(path, error);
         }
 
-        bool hasExecutableExtension(const std::filesystem::path& path)
+        bool hasHealthyDetectedGameDirectory(const std::filesystem::path& directory)
         {
-            std::wstring extension = path.extension().wstring();
-            std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t character)
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            GameDetectionService detectionService(registry);
+            GameDetectionRequest request;
+            request.installPath = directory;
+            const GameDetectionResult detection = detectionService.detect(request);
+            if (!detection.detected)
             {
-                return static_cast<wchar_t>(std::towlower(character));
-            });
-            return extension == L".exe";
-        }
-
-        bool hasImmediateExecutable(const std::filesystem::path& directory)
-        {
-            std::error_code error;
-            for (const std::filesystem::directory_entry& entry :
-                std::filesystem::directory_iterator(directory, error))
-            {
-                if (error)
-                {
-                    break;
-                }
-
-                if (entry.is_regular_file(error) && hasExecutableExtension(entry.path()))
-                {
-                    return true;
-                }
+                return false;
             }
 
-            return false;
-        }
-
-        bool hasKnownGameExecutable(const std::filesystem::path& directory)
-        {
-            static constexpr std::array<std::wstring_view, 10> knownGameExecutables{
-                L"SkyrimSE.exe",
-                L"Skyrim SE.exe",
-                L"SkyrimSELauncher.exe",
-                L"SkyrimVR.exe",
-                L"SkyrimVRLauncher.exe",
-                L"TESV.exe",
-                L"SkyrimLauncher.exe",
-                L"Fallout4.exe",
-                L"Fallout4Launcher.exe",
-                L"Starfield.exe"
-            };
-
-            for (std::wstring_view executable : knownGameExecutables)
-            {
-                if (isRegularFile(directory / std::filesystem::path(executable)))
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            const GameHealthCheckResult health = GameHealthCheckService().check(detection);
+            return health.allowsAutomation();
         }
 
         bool isKnownGameDirectory(const std::filesystem::path& directory)
         {
-            return isDirectory(directory) &&
-                (hasKnownGameExecutable(directory) || isDirectory(directory / L"Data"));
+            return isDirectory(directory) && hasHealthyDetectedGameDirectory(directory);
         }
 
         bool looksLikeModOrganizerRoot(const std::filesystem::path& directory)
@@ -338,23 +304,28 @@ namespace fluxora
         std::optional<std::filesystem::path> localGameDirectoryFromProject(
             const std::filesystem::path& projectDirectory)
         {
-            static constexpr std::array<std::wstring_view, 9> preferredFolderNames{
+            std::vector<std::wstring> preferredFolderNames{
                 L"stock game",
                 L"Stock Game",
                 L"stock_game",
                 L"game",
-                L"Game",
-                L"Skyrim Special Edition",
-                L"SkyrimSE",
-                L"Skyrim SE",
-                L"Skyrim"
+                L"Game"
             };
 
-            for (std::wstring_view folderName : preferredFolderNames)
+            const GameSupportRegistry& registry = GameSupportRegistry::embedded();
+            for (const GameDefinition& definition : registry.definitions())
+            {
+                preferredFolderNames.insert(
+                    preferredFolderNames.end(),
+                    definition.installFolderAliases.begin(),
+                    definition.installFolderAliases.end());
+            }
+
+            for (const std::wstring& folderName : preferredFolderNames)
             {
                 const std::filesystem::path candidate =
                     std::filesystem::absolute(projectDirectory / std::filesystem::path(folderName)).lexically_normal();
-                if (isKnownGameDirectory(candidate) || (isDirectory(candidate) && hasImmediateExecutable(candidate)))
+                if (isKnownGameDirectory(candidate))
                 {
                     return candidate;
                 }
@@ -404,7 +375,13 @@ namespace fluxora
             const BuildPathSettings& settings,
             const std::filesystem::path& projectDirectory)
         {
-            if (projectDirectory.empty() || isKnownGameDirectory(settings.gameDirectory))
+            if (projectDirectory.empty())
+            {
+                return settings;
+            }
+
+            const bool isOrganizerRoot = looksLikeModOrganizerRoot(settings.gameDirectory);
+            if (!isOrganizerRoot && isKnownGameDirectory(settings.gameDirectory))
             {
                 return settings;
             }
@@ -412,7 +389,7 @@ namespace fluxora
             const bool shouldRepair =
                 settings.gameDirectory.empty() ||
                 !pathExists(settings.gameDirectory) ||
-                looksLikeModOrganizerRoot(settings.gameDirectory) ||
+                isOrganizerRoot ||
                 isSameOrInsidePath(settings.gameDirectory, projectDirectory);
             if (!shouldRepair)
             {
@@ -567,6 +544,16 @@ namespace fluxora
                 throw std::invalid_argument("Game directory does not exist.");
             }
 
+            const PathSafetyService safety;
+            safety.validateDirectoryWriteRoot(settings.modsDirectory)
+                .throwIfUnsafe("Mods directory is unsafe");
+            safety.validateDirectoryWriteRoot(settings.profilesDirectory)
+                .throwIfUnsafe("Profiles directory is unsafe");
+            safety.validateDirectoryWriteRoot(settings.downloadsDirectory)
+                .throwIfUnsafe("Downloads directory is unsafe");
+            safety.validateDirectoryWriteRoot(settings.overwriteDirectory)
+                .throwIfUnsafe("Overwrite directory is unsafe");
+
             std::filesystem::create_directories(settings.modsDirectory);
             std::filesystem::create_directories(settings.profilesDirectory);
             std::filesystem::create_directories(settings.downloadsDirectory);
@@ -663,9 +650,12 @@ namespace fluxora
 
         BuildPathSettings loadLocalSettings(
             const std::filesystem::path& projectDirectory,
-            BuildPathSettings settings)
+            BuildPathSettings settings,
+            Logger* logger)
         {
-            const std::string content = readTextFileOrEmpty(localPathSettingsFile(projectDirectory));
+            const std::filesystem::path localSettingsPath = localPathSettingsFile(projectDirectory);
+            recoverJsonStateFile(localSettingsPath, L"profile path settings", logger);
+            const std::string content = readTextFileOrEmpty(localSettingsPath);
             if (content.empty())
             {
                 return settings;
@@ -718,6 +708,7 @@ namespace fluxora
             throw std::invalid_argument("Build config file does not exist.");
         }
 
+        recoverJsonStateFile(absoluteConfigPath, L"project manifest", &logger_);
         const JsonValue manifest = parseJsonConfig(readTextFile(absoluteConfigPath));
         BuildPathSettings defaults = defaultsFromManifest(manifest, absoluteConfigPath);
         BuildPathSettings settings = defaults;
@@ -730,7 +721,7 @@ namespace fluxora
 
         if (!projectDirectory.empty())
         {
-            settings = loadLocalSettings(projectDirectory, settings);
+            settings = loadLocalSettings(projectDirectory, settings, &logger_);
         }
 
         settings = normalizeSettings(settings, defaults);
@@ -752,6 +743,7 @@ namespace fluxora
             throw std::invalid_argument("Build config file does not exist.");
         }
 
+        recoverJsonStateFile(absoluteConfigPath, L"project manifest", &logger_);
         JsonValue manifest = parseJsonConfig(readTextFile(absoluteConfigPath));
         BuildPathSettings defaults = defaultsFromManifest(manifest, absoluteConfigPath);
         const std::filesystem::path projectDirectory = projectDirectoryFromDefaults(defaults);
@@ -759,16 +751,40 @@ namespace fluxora
 
         validateSettingsForSave(normalized);
 
-        writeTextFileAtomic(
-            localPathSettingsFile(projectDirectory),
-            serializeLocalSettings(normalized, projectDirectory));
+        AtomicFileStore fileStore;
+        const std::filesystem::path markerDirectory = projectDirectory.empty()
+            ? absoluteConfigPath.parent_path()
+            : projectDirectory / L".fluxora";
+        ProjectStateTransaction transaction(
+            fileStore,
+            markerDirectory,
+            L"build path settings update",
+            &logger_);
+
+        const std::filesystem::path localSettingsPath = localPathSettingsFile(projectDirectory);
+        transaction.trackFile(
+            localSettingsPath,
+            L"profile path settings",
+            ProjectStateValidation::JsonObject);
+        writeJsonStateFile(
+            localSettingsPath,
+            serializeLocalSettings(normalized, projectDirectory),
+            L"profile path settings");
 
         JsonValue::Object object = manifest.asObject();
         object.insert_or_assign(
             L"gamePath",
             JsonValue::string(pathTextForStorage(normalized.gameDirectory, projectDirectory)));
         object.insert_or_assign(std::wstring(pathsField), settingsJsonObject(normalized, projectDirectory));
-        writeTextFileAtomic(absoluteConfigPath, serializeJson(JsonValue::object(std::move(object))));
+        transaction.trackFile(
+            absoluteConfigPath,
+            L"project manifest",
+            ProjectStateValidation::JsonObject);
+        writeJsonStateFile(
+            absoluteConfigPath,
+            serializeJson(JsonValue::object(std::move(object))),
+            L"project manifest");
+        transaction.commit();
 
         logger_.write(LogLevel::Info, "Build path settings updated.");
         return normalized;
@@ -785,7 +801,8 @@ namespace fluxora
         BuildPathSettings defaults = defaultSettingsForProjectDirectory(projectDirectory);
         BuildPathSettings settings = loadLocalSettings(
             std::filesystem::absolute(projectDirectory).lexically_normal(),
-            defaults);
+            defaults,
+            &logger_);
         settings = normalizeSettings(settings, defaults);
         return repairTransferredGameDirectory(
             settings,
