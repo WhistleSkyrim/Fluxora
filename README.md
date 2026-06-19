@@ -44,12 +44,12 @@ The frontend is a WPF application that provides the visual interface for Fluxora
 
 The WPF project lives in `frontend`.
 
-## Уникальные функции
+## Unique Features
 
-- **Скорость как главный приоритет.** Fluxora делает ставку на быстрый запуск игры, быстрый отклик интерфейса и минимум ожидания при работе с модами. Нативное C++ ядро берет на себя тяжелые операции, поэтому менеджер остается легким и отзывчивым там, где классические лаунчеры и мод-менеджеры часто тормозят.
-- **Полноценный офлайн-режим.** Уже установленные игры, профили и моды остаются доступными без интернета: можно спокойно запускать игру и играть с выбранной сборкой даже без подключения к сети.
-- **Обмен мод-паками в один клик.** Пользователь может подготовить и поделиться своей сборкой без ручной упаковки, сложных инструкций и долгих настроек.
-- **Перенос готовой сборки из Mod Organizer 2.** Fluxora помогает импортировать существующую сборку из MO2, чтобы продолжить работу с ней в нашей программе.
+- **Speed as the top priority.** Fluxora focuses on fast game startup, responsive UI feedback, and minimal waiting while working with mods. The native C++ core handles heavy operations, keeping the manager lightweight and responsive where traditional launchers and mod managers often slow down.
+- **Full offline mode.** Installed games, profiles, and mods remain available without an internet connection, so users can launch the game and play with the selected build even when offline.
+- **One-click mod pack sharing.** Users can prepare and share their builds without manual packaging, complicated instructions, or lengthy setup.
+- **Import existing Mod Organizer 2 builds.** Fluxora helps import an existing MO2 build so users can continue working with it in this application.
 
 ## Build
 
