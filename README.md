@@ -47,8 +47,11 @@ The WPF project lives in `frontend`.
 ## Unique Features
 
 - **Speed as the top priority.** Fluxora focuses on fast game startup, responsive UI feedback, and minimal waiting while working with mods. The native C++ core handles heavy operations, keeping the manager lightweight and responsive where traditional launchers and mod managers often slow down.
+
 - **Full offline mode.** Installed games, profiles, and mods remain available without an internet connection, so users can launch the game and play with the selected build even when offline.
+  
 - **One-click mod pack sharing.** Users can prepare and share their builds without manual packaging, complicated instructions, or lengthy setup.
+  
 - **Import existing Mod Organizer 2 builds.** Fluxora helps import an existing MO2 build so users can continue working with it in this application.
 
 ## Build
@@ -87,4 +90,4 @@ This repository currently contains the base project layout and service skeletons
 
 ## Ownership
 
-Fluxora is part of ModdingFlow. See the `LICENSE` file for usage restrictions.
+Fluxora is part of [ModdingFlow](https://www.moddingflow.com/). See the `LICENSE` file for usage restrictions.
